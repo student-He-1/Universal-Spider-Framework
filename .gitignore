@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# 运行时数据
+data/demo/
+data/storage/
+data/resume/
+data/raw/
+data/cleaned/
+*.db
+*.sqlite
+*.sqlite3
+*.jl
+
+# 日志
+logs/
+*.log
+
+# 环境变量
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# conda
+conda_cache/

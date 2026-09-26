@@ -1,0 +1,31 @@
+{
+  "query": "其实就是整个UI页面我还觉得不太好看，我很讨厌渐变紫，然后整个页面不统一，你有何建议，调用UI技能，给我分析一下布局和配色",
+  "signature": {
+    "ground": null,
+    "typeVoice": null,
+    "imageWorld": "graphic-abstract",
+    "layoutLogic": null,
+    "colorStrategy": null,
+    "motionVoice": null
+  },
+  "why": {
+    "ground": "query 没给这一维的信号 —— 由你按内容定",
+    "typeVoice": "query 没给这一维的信号 —— 由你按内容定",
+    "imageWorld": "语义命中 1 个线索",
+    "layoutLogic": "query 没给这一维的信号 —— 由你按内容定",
+    "colorStrategy": "query 没给这一维的信号 —— 由你按内容定",
+    "motionVoice": "query 没给这一维的信号 —— 由你按内容定"
+  },
+  "open": [
+    "ground",
+    "typeVoice",
+    "layoutLogic",
+    "colorStrategy",
+    "motionVoice"
+  ],
+  "divergence": {
+    "vsRecent": [],
+    "min": null,
+    "require": 3
+  }
+}

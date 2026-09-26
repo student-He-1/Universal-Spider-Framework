@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>万能爬虫 · 可视化控制台</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+    <!-- 顶部工作栏 -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <span class="logo-mark" aria-hidden="true">🕷️</span>
+            <div class="brand">
+                <h1 class="brand-title">万能爬虫</h1>
+                <span class="brand-sub">Universal Crawler Console</span>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <span class="engine-badge">
+                <span class="dot"></span>
+                核心引擎 · universal_crawler.py
+            </span>
+            <span id="ws-status" class="ws-status disconnected">未连接</span>
+        </div>
+    </header>
+
+    <div class="main-container">
+
+        <!-- 左侧：配置面板 -->
+        <aside class="config-panel">
+
+            <!-- 站点探测器 -->
+            <section class="card probe-section">
+                <div class="probe-head">
+                    <span class="probe-title">站点探测器</span>
+                    <span id="probe-status" class="probe-status">未探测</span>
+                </div>
+                <div class="template-row">
+                    <input type="text" id="probe-url" placeholder="输入网址，如 https://example.com/list">
+                    <button id="probe-run" class="btn btn-secondary">探测</button>
+                </div>
+                <div id="probe-result" class="probe-result hidden"></div>
+            </section>
+
+            <!-- 预设模板 -->
+            <section class="card">
+                <div class="form-group" style="margin-bottom:0">
+                    <label for="template-select">快速加载模板</label>
+                    <div class="template-row">
+                        <select id="template-select">
+                            <option value="">-- 选择预设模板 --</option>
+                        </select>
+                        <button id="load-template" class="btn btn-secondary">加载</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card config-section">
+                <h3 class="section-title">基础配置</h3>
+
+                <div class="form-group">
+                    <label for="cfg-name">任务名称 <span class="required">*</span></label>
+                    <input type="text" id="cfg-name" placeholder="如：淘宝电脑销售" value="我的爬取任务">
+                </div>
+
+                <div class="form-group">
+                    <label for="cfg-render">渲染方式</label>
+                    <select id="cfg-render">
+                        <option value="direct">direct — 直接下载（快，适合静态站）</option>
+                        <option value="playwright">playwright — 浏览器渲染（慢，适合JS动态站）</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="cfg-pagination-type">翻页策略</label>
+                    <select id="cfg-pagination-type">
+                        <option value="url_pattern">url_pattern — 网址有规律，换页码</option>
+                        <option value="next_button">next_button — 点下一页按钮</option>
+                        <option value="infinite_scroll">infinite_scroll — 无限滚动</option>
+                        <option value="none">none — 只有一页</option>
+                    </select>
+                </div>
+
+                <!-- 翻页相关配置（动态显示） -->
+                <div id="pg-url-pattern" class="pagination-config">
+                    <div class="form-group">
+                        <label for="cfg-url-pattern">网址规律（页码用 {page} 代替）</label>
+                        <input type="text" id="cfg-url-pattern" placeholder="如：http://xxx/page-{page}.html">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cfg-start-page">起始页</label>
+                            <input type="number" id="cfg-start-page" value="1" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="cfg-max-pages">最大页数</label>
+                            <input type="number" id="cfg-max-pages" value="2" min="1">
+                        </div>
+                    </div>
+                </div>
+
+                <div id="pg-next-button" class="pagination-config hidden">
+                    <div class="form-group">
+                        <label for="cfg-next-selector">下一页按钮选择器</label>
+                        <input type="text" id="cfg-next-selector" placeholder="如：li.ant-pagination-next">
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-disabled-marker">末页标志</label>
+                        <input type="text" id="cfg-disabled-marker" value="disabled">
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-max-pages-nb">最大页数</label>
+                        <input type="number" id="cfg-max-pages-nb" value="3" min="1">
+                    </div>
+                </div>
+
+                <div id="pg-infinite-scroll" class="pagination-config hidden">
+                    <div class="form-group">
+                        <label for="cfg-scroll-pause">每次滚动等待秒数</label>
+                        <input type="number" id="cfg-scroll-pause" value="1.5" step="0.5" min="0.5">
+                    </div>
+                </div>
+
+                <div id="pg-single-url" class="pagination-config hidden">
+                    <div class="form-group">
+                        <label for="cfg-first-url-single">页面网址</label>
+                        <input type="text" id="cfg-first-url-single" placeholder="如：https://xxx.com/page">
+                    </div>
+                </div>
+
+                <!-- next_button 和 infinite_scroll 也需要 first_url -->
+                <div id="pg-first-url" class="form-group hidden">
+                    <label for="cfg-first-url">起始网址</label>
+                    <input type="text" id="cfg-first-url" placeholder="如：https://xxx.com/list">
+                </div>
+            </section>
+
+            <section class="card config-section">
+                <h3 class="section-title">内容提取</h3>
+
+                <div class="form-group">
+                    <label for="cfg-item-selector">内容「盒子」选择器 <span class="required">*</span></label>
+                    <input type="text" id="cfg-item-selector" placeholder="如：div.product / article.item">
+                </div>
+
+                <div class="form-group">
+                    <label>字段配置（列名 → 选择器）</label>
+                    <div id="fields-container">
+                        <!-- 动态添加的字段行 -->
+                    </div>
+                    <button id="add-field" class="btn btn-secondary btn-sm add-field-btn">＋ 添加字段</button>
+                </div>
+            </section>
+
+            <section class="card config-section">
+                <h3 class="section-title">高级选项</h3>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="cfg-delay">每页延时（秒）</label>
+                        <input type="number" id="cfg-delay" value="1.0" step="0.1" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-page-wait">加载等待（ms）</label>
+                        <input type="number" id="cfg-page-wait" value="3000" step="500" min="1000">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="cfg-proxy">HTTP 代理（可选）&nbsp;<span class="api-hint">支持多代理逗号分隔</span></label>
+                    <input type="text" id="cfg-proxy" placeholder="如 http://127.0.0.1:7890 或 p1:8080,p2:8080">
+                </div>
+
+                <div class="form-group">
+                    <label for="cfg-postprocess">字段后处理（可选，JSON）&nbsp;<span class="api-hint">清洗规则</span></label>
+                    <textarea id="cfg-postprocess" rows="3" placeholder='{"价格": {"remove": "元", "digits_only": true}}'></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="cfg-api">API 接口提取（可选，JSON）&nbsp;<span class="api-hint">填则优先用接口数据</span></label>
+                    <textarea id="cfg-api" rows="4" placeholder='{"item_path": "data.items", "fields": {"书名": "title", "价格": "price"}}'></textarea>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="cfg-dedup-key">去重字段（可选，留空不去重）</label>
+                        <input type="text" id="cfg-dedup-key" placeholder="如：链接">
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-concurrency">并发数（翻页）</label>
+                        <input type="number" id="cfg-concurrency" value="1" min="1" max="20">
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="cfg-resume">
+                            <input type="checkbox" id="cfg-resume" style="width:auto;vertical-align:middle;margin-right:6px;accent-color:var(--accent)">
+                            断点续爬
+                        </label>
+                        <span class="api-hint">重跑时跳过已爬页</span>
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-headers">自定义请求头（可选，JSON）&nbsp;<span class="api-hint">反爬站需填 Referer 等</span></label>
+                        <textarea id="cfg-headers" rows="2" placeholder='{"Referer": "https://www.weather.com.cn/", "Accept-Language": "zh-CN"}'></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-storage">存储配置（可选，JSON）</label>
+                        <input type="text" id="cfg-storage" placeholder='{"type":"sqlite","table":"items"}'>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 开始按钮 -->
+            <button id="start-crawl" class="btn btn-primary btn-large">
+                <span class="btn-icon" aria-hidden="true">↗</span>
+                开始爬取
+            </button>
+        </aside>
+
+        <!-- 右侧：日志和结果 -->
+        <main class="result-panel">
+
+            <!-- 统计卡片行 -->
+            <div class="stats-row">
+                <div class="stat-card" id="status-bar">
+                    <div class="stat-label">任务状态</div>
+                    <div class="stat-value-wrap">
+                        <span class="status-idle">等待开始</span>
+                    </div>
+                </div>
+                <div class="stat-card" id="task-stats">
+                    <div class="stat-label">当前任务</div>
+                    <div class="stat-value-wrap">
+                        <span id="task-stats-content" class="stats-content"><span class="api-hint">等待开始</span></span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">渲染方式</div>
+                    <div class="stat-value-wrap">
+                        <span id="stat-render" class="stat-value-mono">direct</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">并发 / 延时</div>
+                    <div class="stat-value-wrap">
+                        <span id="stat-concurrency" class="stat-value-mono">1 · 1.0s</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 实时日志 -->
+            <div class="log-section">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <span class="section-led"></span>
+                        <h3>实时日志</h3>
+                    </div>
+                    <button id="clear-log" class="btn btn-ghost btn-sm">清空</button>
+                </div>
+                <div id="log-panel" class="log-panel"></div>
+            </div>
+
+            <!-- 结果表格 -->
+            <div class="result-section hidden" id="result-section">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <h3>爬取结果</h3>
+                        <span id="result-count" class="count-badge">0</span>
+                    </div>
+                    <a id="download-btn" class="btn btn-primary btn-sm" href="#" download>↓ 下载 Excel</a>
+                </div>
+                <div class="table-container">
+                    <table id="result-table">
+                        <thead><tr id="result-head"></tr></thead>
+                        <tbody id="result-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
