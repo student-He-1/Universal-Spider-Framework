@@ -39,3 +39,6 @@ Thumbs.db
 
 # conda
 conda_cache/
+
+# UI 设计工具临时文件
+ui-design-runs/

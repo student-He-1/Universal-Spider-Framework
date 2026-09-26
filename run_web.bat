@@ -1,15 +1,11 @@
 @echo off
 REM ============================================================
 REM Universal Crawler - Web Console Launcher
-REM Place this .bat in the project root directory
+REM Usage: Activate your Python env first (conda activate spider),
+REM        then double-click this file or run it in terminal.
 REM ============================================================
 
 set "PROJECT_DIR=%~dp0"
-set "SPIDER_PYTHON=D:\79458\Documents\anaconda3\envs\spider\python.exe"
-set "PLAYWRIGHT_BROWSERS_PATH=D:\conda_cache\playwright"
-set "TEMP=D:\conda_cache\temp"
-set "TMP=D:\conda_cache\temp"
-
 cd /d "%PROJECT_DIR%"
 
 echo ============================================================
@@ -22,6 +18,6 @@ echo.
 
 start "" /min cmd /c "timeout /t 3 /nobreak >nul && start http://127.0.0.1:5000"
 
-"%SPIDER_PYTHON%" "web\app.py"
+python web\app.py
 
 pause

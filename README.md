@@ -33,9 +33,21 @@
 
 ### 1. 启动控制台
 
+**方式一：一键启动（推荐）**
+
+先激活 Python 环境，然后双击 `run_web.bat`：
+
 ```bash
-# 使用 conda 环境（已安装全部依赖）
-D:\79458\Documents\anaconda3\Scripts\activate.bat D:\79458\Documents\anaconda3\envs\spider
+# 激活环境（conda 示例）
+conda activate spider
+# 然后双击 run_web.bat，或命令行运行
+run_web.bat
+```
+
+**方式二：命令行启动**
+
+```bash
+conda activate spider
 python web\app.py
 ```
 
