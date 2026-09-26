@@ -1,12 +1,14 @@
 @echo off
 REM ============================================================
 REM Universal Crawler - Web Console Launcher
-REM Usage: Activate your Python env first (conda activate spider),
-REM        then double-click this file or run it in terminal.
+REM Auto-activates conda env "spider" if available, then starts.
 REM ============================================================
 
 set "PROJECT_DIR=%~dp0"
 cd /d "%PROJECT_DIR%"
+
+REM Try to activate conda env "spider" (silently fail if not found)
+call conda activate spider 2>nul
 
 echo ============================================================
 echo   Universal Crawler Web Console
