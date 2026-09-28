@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 170" width="720" height="170" role="img" aria-labelledby="sfLogoTitle">
-  <title id="sfLogoTitle">Universal Spider Framework — 万能爬虫框架</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 336" width="560" height="336" role="img" aria-labelledby="sfTitle">
+  <title id="sfTitle">Universal Spider Framework — 万能爬虫框架</title>
 
   <style>
     /* ---------------------------------------------------------------
@@ -7,13 +7,21 @@
        但保留 CSS 动画，因此作为图片嵌入 README 时仍会播放。
        静态基线为「最终可见状态」：若样式被剥离，仍是一个完整的静态 logo。
        配色取自控制台自身 web/static/css/style.css（--accent / --accent-hover）。
+       雷达扫描对应该框架的「站点探测器」与监控面板。
        --------------------------------------------------------------- */
 
-    /* 连线自绘：枢纽→卫星 与 卫星→卫星 均为 46 单位，共用一条规则 */
-    @keyframes drawLink { from { stroke-dashoffset: 47; } to { stroke-dashoffset: 0; } }
-    .drawLink { stroke-dasharray: 47; animation: drawLink .46s cubic-bezier(.65,0,.35,1) both; }
+    /* 圆环由内向外展开 */
+    @keyframes ringIn {
+      from { opacity: 0; transform: scale(.82); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+    .ringIn {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: ringIn .6s cubic-bezier(.22,1,.36,1) both;
+    }
 
-    /* 节点弹出 */
+    /* 中心核心 */
     @keyframes pop {
       from { opacity: 0; transform: scale(.3); }
       to   { opacity: 1; transform: scale(1); }
@@ -21,109 +29,107 @@
     .pop {
       transform-box: fill-box;
       transform-origin: center;
-      animation: pop .42s cubic-bezier(.34,1.56,.64,1) both;
+      animation: pop .45s cubic-bezier(.34,1.56,.64,1) both;
     }
 
-    /* 数据脉冲：沿连线向外/环向流动（常驻） */
-    @keyframes flow { from { stroke-dashoffset: 46; } to { stroke-dashoffset: 0; } }
-    .flow {
-      stroke-dasharray: 9 37;
-      animation: flow 1.6s linear infinite;
+    /* 扫描线 + 扇区：常驻旋转 */
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .sweep {
+      transform-box: view-box;
+      transform-origin: 280px 118px;
+      animation: spin 4s linear infinite;
     }
 
-    /* 枢纽核心呼吸（常驻）。pop 管 opacity，breathe 管 fill-opacity，互不冲突 */
-    @keyframes breathe {
-      0%, 100% { fill-opacity: .55; transform: scale(.9); }
-      50%      { fill-opacity: 1;   transform: scale(1.12); }
+    /* 光点：周期与扫描周期一致（4s），延迟按角度换算，
+       使每个光点恰好在扫描线掠过时亮起 */
+    @keyframes blip {
+      0%   { opacity: 0;   transform: scale(.4); }
+      5%   { opacity: 1;   transform: scale(1.7); }
+      18%  { opacity: .85; transform: scale(1); }
+      65%  { opacity: .22; transform: scale(.9); }
+      100% { opacity: 0;   transform: scale(.4); }
     }
-    .hub {
+    .blip {
       transform-box: fill-box;
       transform-origin: center;
-      animation: pop .45s cubic-bezier(.34,1.56,.64,1) both,
-                 breathe 2.6s ease-in-out 2.9s infinite;
+      animation: blip 4s ease-out infinite normal backwards;
     }
 
-    /* 文字上浮 */
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(9px); }
-      to   { opacity: 1; transform: translateY(0); }
+    /* 字标：遮罩横向擦除显现 */
+    @keyframes wipe { from { transform: translateX(-560px); } to { transform: translateX(0); } }
+    .wipeRect {
+      transform-box: view-box;
+      animation: wipe .95s cubic-bezier(.65,0,.35,1) 2.2s both;
     }
-    .rise { animation: rise .55s cubic-bezier(.22,1,.36,1) both; }
+
+    /* 分隔线：从中心向两侧展开 */
+    @keyframes ruleIn { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    .rule {
+      transform-box: view-box;
+      transform-origin: 280px 276px;
+      animation: ruleIn .6s cubic-bezier(.22,1,.36,1) 2.9s both;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .fadeIn { animation: fadeIn .6s ease-out both; }
 
     @media (prefers-reduced-motion: reduce) {
-      .drawLink, .pop, .hub, .rise { animation: none !important; }
-      .flow { display: none; }
+      .ringIn, .pop, .sweep, .blip, .wipeRect, .rule, .fadeIn { animation: none !important; }
     }
   </style>
 
-  <!-- ============ 左侧：网状拓扑 ============ -->
+  <defs>
+    <mask id="sfWipe">
+      <rect class="wipeRect" x="0" y="0" width="560" height="336" fill="#fff"/>
+    </mask>
+  </defs>
 
-  <!-- 蛛网外环：卫星之间的 6 条连线 -->
-  <g stroke="#0891B2" stroke-width="1.2" stroke-linecap="round" opacity=".32">
-    <line class="drawLink" x1="294" y1="85"     x2="271" y2="45.16"  style="animation-delay:1.10s"/>
-    <line class="drawLink" x1="271" y1="45.16"  x2="225" y2="45.16"  style="animation-delay:1.15s"/>
-    <line class="drawLink" x1="225" y1="45.16"  x2="202" y2="85"     style="animation-delay:1.20s"/>
-    <line class="drawLink" x1="202" y1="85"     x2="225" y2="124.84" style="animation-delay:1.25s"/>
-    <line class="drawLink" x1="225" y1="124.84" x2="271" y2="124.84" style="animation-delay:1.30s"/>
-    <line class="drawLink" x1="271" y1="124.84" x2="294" y2="85"     style="animation-delay:1.35s"/>
+  <!-- ============ 上半部分：雷达扫描 ============ -->
+
+  <!-- 十字准线 -->
+  <g class="fadeIn" style="animation-delay:.65s" stroke="#0891B2" stroke-width="1" opacity=".22">
+    <line x1="196" y1="118" x2="364" y2="118"/>
+    <line x1="280" y1="34"  x2="280" y2="202"/>
   </g>
 
-  <!-- 辐射连线：枢纽 → 6 个卫星 -->
-  <g stroke="#0891B2" stroke-width="1.6" stroke-linecap="round" opacity=".55">
-    <line class="drawLink" x1="248" y1="85" x2="294" y2="85"     style="animation-delay:.35s"/>
-    <line class="drawLink" x1="248" y1="85" x2="271" y2="45.16"  style="animation-delay:.40s"/>
-    <line class="drawLink" x1="248" y1="85" x2="225" y2="45.16"  style="animation-delay:.45s"/>
-    <line class="drawLink" x1="248" y1="85" x2="202" y2="85"     style="animation-delay:.50s"/>
-    <line class="drawLink" x1="248" y1="85" x2="225" y2="124.84" style="animation-delay:.55s"/>
-    <line class="drawLink" x1="248" y1="85" x2="271" y2="124.84" style="animation-delay:.60s"/>
+  <!-- 刻度圆环（外 → 内） -->
+  <g fill="none" stroke="#0891B2">
+    <circle class="ringIn" cx="280" cy="118" r="84" stroke-width="1.6" opacity=".55" style="animation-delay:0s"/>
+    <circle class="ringIn" cx="280" cy="118" r="56" stroke-width="1.3" opacity=".4"  style="animation-delay:.25s"/>
+    <circle class="ringIn" cx="280" cy="118" r="28" stroke-width="1.1" opacity=".28" style="animation-delay:.45s"/>
   </g>
 
-  <!-- 数据脉冲（覆在连线上） -->
-  <g stroke="#67E8F9" stroke-width="2.2" stroke-linecap="round" fill="none">
-    <line class="flow" x1="248" y1="85" x2="294" y2="85"     style="animation-delay:0s"/>
-    <line class="flow" x1="248" y1="85" x2="271" y2="45.16"  style="animation-delay:.27s"/>
-    <line class="flow" x1="248" y1="85" x2="225" y2="45.16"  style="animation-delay:.54s"/>
-    <line class="flow" x1="248" y1="85" x2="202" y2="85"     style="animation-delay:.81s"/>
-    <line class="flow" x1="248" y1="85" x2="225" y2="124.84" style="animation-delay:1.08s"/>
-    <line class="flow" x1="248" y1="85" x2="271" y2="124.84" style="animation-delay:1.35s"/>
-    <line class="flow" x1="294" y1="85"     x2="271" y2="45.16"  style="animation-delay:.15s"/>
-    <line class="flow" x1="271" y1="45.16"  x2="225" y2="45.16"  style="animation-delay:.42s"/>
-    <line class="flow" x1="225" y1="45.16"  x2="202" y2="85"     style="animation-delay:.69s"/>
-    <line class="flow" x1="202" y1="85"     x2="225" y2="124.84" style="animation-delay:.96s"/>
-    <line class="flow" x1="225" y1="124.84" x2="271" y2="124.84" style="animation-delay:1.23s"/>
-    <line class="flow" x1="271" y1="124.84" x2="294" y2="85"     style="animation-delay:1.50s"/>
+  <!-- 扫描扇区 + 扫描线 -->
+  <g class="sweep">
+    <path d="M 280 118 L 280 34 A 84 84 0 0 0 238 45.2 Z" fill="#22D3EE" opacity=".13"/>
+    <line x1="280" y1="118" x2="280" y2="34" stroke="#67E8F9" stroke-width="2" stroke-linecap="round"/>
   </g>
 
-  <!-- 卫星节点（覆盖连线端点，使连线看起来首尾齐整） -->
-  <g fill="#0891B2">
-    <circle class="pop" cx="294" cy="85"     r="6" style="animation-delay:.70s"/>
-    <circle class="pop" cx="271" cy="45.16"  r="6" style="animation-delay:.76s"/>
-    <circle class="pop" cx="225" cy="45.16"  r="6" style="animation-delay:.82s"/>
-    <circle class="pop" cx="202" cy="85"     r="6" style="animation-delay:.88s"/>
-    <circle class="pop" cx="225" cy="124.84" r="6" style="animation-delay:.94s"/>
-    <circle class="pop" cx="271" cy="124.84" r="6" style="animation-delay:1.00s"/>
+  <!-- 捕获到的目标光点：延迟 = 扫描线转过的角度 / 360 × 4s -->
+  <g fill="#67E8F9">
+    <circle class="blip" cx="338.9" cy="84"    r="3.5" style="animation-delay:.667s"/>
+    <circle class="blip" cx="306"   cy="189.4" r="3.5" style="animation-delay:1.778s"/>
+    <circle class="blip" cx="229.3" cy="136.5" r="3.5" style="animation-delay:2.778s"/>
+    <circle class="blip" cx="232.5" cy="78.1"  r="3.5" style="animation-delay:3.444s"/>
   </g>
 
-  <!-- 枢纽核心 -->
-  <circle class="hub" cx="248" cy="85" r="9" fill="#22D3EE" style="animation-delay:0s"/>
+  <!-- 中心核心 -->
+  <circle class="pop" cx="280" cy="118" r="6" fill="#22D3EE" style="animation-delay:.85s"/>
 
-  <!-- ============ 右侧：字标 ============ -->
+  <!-- ============ 下半部分：字标（居中） ============ -->
 
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
-     font-size="34" font-weight="700" fill="#0891B2" text-anchor="start">
-    <text class="rise" x="340"   y="81" style="animation-delay:2.200s">U</text>
-    <text class="rise" x="360.4" y="81" style="animation-delay:2.250s">N</text>
-    <text class="rise" x="380.8" y="81" style="animation-delay:2.300s">I</text>
-    <text class="rise" x="401.2" y="81" style="animation-delay:2.350s">V</text>
-    <text class="rise" x="421.6" y="81" style="animation-delay:2.400s">E</text>
-    <text class="rise" x="442"   y="81" style="animation-delay:2.450s">R</text>
-    <text class="rise" x="462.4" y="81" style="animation-delay:2.500s">S</text>
-    <text class="rise" x="482.8" y="81" style="animation-delay:2.550s">A</text>
-    <text class="rise" x="503.2" y="81" style="animation-delay:2.600s">L</text>
+  <g mask="url(#sfWipe)"
+     font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+     font-size="28" text-anchor="start" fill="#0891B2">
+    <text x="145.6" y="258" font-weight="700">UNIVERSAL</text>
+    <text x="313.6" y="258" font-weight="400" opacity=".72">SPIDER</text>
   </g>
 
-  <text class="rise" x="340" y="111"
+  <line class="rule" x1="145.6" y1="276" x2="414.4" y2="276"
+        stroke="#0891B2" stroke-width="1" opacity=".35"/>
+
+  <text class="fadeIn" x="183" y="300"
         font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
-        font-size="15" fill="#64748B" textLength="184" lengthAdjust="spacing"
-        style="animation-delay:2.85s">SPIDER FRAMEWORK</text>
+        font-size="13" fill="#64748B" textLength="194" lengthAdjust="spacing"
+        style="animation-delay:3.10s">CONFIG-DRIVEN ENGINE</text>
 </svg>

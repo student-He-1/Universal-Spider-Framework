@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Universal Spider Framework" width="720">
+<img src="assets/logo.svg" alt="Universal Spider Framework" width="560">
 
 </div>
 
