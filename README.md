@@ -1,3 +1,9 @@
+<div align="center">
+
+<img src="assets/logo.svg" alt="Universal Spider Framework" width="720">
+
+</div>
+
 # 万能爬虫框架
 
 > **项目状态：个人初版 v0.1**
