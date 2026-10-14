@@ -58,13 +58,15 @@ def run(spider_name: str = "ecommerce_demo", item_limit: int = 5):
         print(f"\n  共抓取 {total} 条，数据目录: {raw_dir}")
         if total > 0:
             print("  ✅ 冒烟测试通过，数据已落盘到 D 盘")
-        else:
-            print("  ❌ 未抓到数据")
-    else:
-        print(f"  ❌ 数据目录不存在: {raw_dir}")
+            return True
+        print("  ❌ 未抓到数据")
+        return False
+    print(f"  ❌ 数据目录不存在: {raw_dir}")
+    return False
 
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else "ecommerce_demo"
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-    run(name, limit)
+    # 退出码：成功 0，失败 1 —— 便于 CI / 脚本判断回归是否通过
+    sys.exit(0 if run(name, limit) else 1)

@@ -3,27 +3,26 @@
 根据站点动态建表，字段由清洗后的数据自动推断
 也支持预定义表结构
 """
-import re
 from typing import Dict, List, Optional, Set
 import psycopg2
 from psycopg2.extras import Json, execute_values
 
 from config.settings import settings
-from storage.base import BaseStorage
-from utils.helpers import url_fingerprint
+from storage.base import BaseStorage, ensure_unique_key
+from utils.helpers import sanitize_identifier, url_fingerprint
 from utils.logger import get_logger
 
 logger = get_logger("cleaned_storage")
 
 
 def _sanitize_table_name(name: str) -> str:
-    """清理表名，只保留字母数字下划线"""
-    return re.sub(r"[^a-zA-Z0-9_]", "_", name).lower()
+    """清理表名：转成合法标识符，中文等被转写时追加短哈希消歧"""
+    return sanitize_identifier(name, fallback="table") or "unnamed"
 
 
 def _sanitize_column(name: str) -> str:
-    """清理列名"""
-    return re.sub(r"[^a-zA-Z0-9_]", "_", name).lower()
+    """清理列名：转成合法标识符，避免「书名」「价格」都变成同一列"""
+    return sanitize_identifier(name) or "col"
 
 
 def _infer_sql_type(value) -> str:
@@ -70,7 +69,7 @@ class PostgresCleanedStorage(BaseStorage):
         columns = [
             "id SERIAL PRIMARY KEY",
             "url TEXT",
-            "url_hash VARCHAR(64) UNIQUE",
+            "url_hash VARCHAR(64)",
             "site_name VARCHAR(128)",
             "cleaned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         ]
@@ -88,6 +87,8 @@ class PostgresCleanedStorage(BaseStorage):
             conn = self._get_conn()
             with conn.cursor() as cur:
                 cur.execute(sql)
+                # 唯一键收敛为 (site_name, url_hash)：不同站点可各存同一 URL
+                ensure_unique_key(cur, table, ["site_name", "url_hash"])
             self._existing_tables.add(table)
             logger.info(f"清洗数据表已创建/确认: {table}")
         except Exception as e:
@@ -149,12 +150,12 @@ class PostgresCleanedStorage(BaseStorage):
         col_str = ", ".join(f'"{c}"' for c in columns)
 
         # UPSERT
-        update_cols = [c for c in columns if c not in ("url_hash",)]
+        update_cols = [c for c in columns if c not in ("url_hash", "site_name")]
         update_str = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
 
         sql = f"""
         INSERT INTO {table} ({col_str}) VALUES ({placeholders})
-        ON CONFLICT (url_hash) DO UPDATE SET {update_str}
+        ON CONFLICT (site_name, url_hash) DO UPDATE SET {update_str}
         """
         try:
             conn = self._get_conn()
@@ -201,12 +202,12 @@ class PostgresCleanedStorage(BaseStorage):
 
         columns = list(rows[0].keys())
         col_str = ", ".join(f'"{c}"' for c in columns)
-        update_cols = [c for c in columns if c != "url_hash"]
+        update_cols = [c for c in columns if c not in ("url_hash", "site_name")]
         update_str = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
 
         sql = f"""
         INSERT INTO {table} ({col_str}) VALUES %s
-        ON CONFLICT (url_hash) DO UPDATE SET {update_str}
+        ON CONFLICT (site_name, url_hash) DO UPDATE SET {update_str}
         """
         try:
             conn = self._get_conn()

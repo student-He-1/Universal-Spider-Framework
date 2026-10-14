@@ -62,15 +62,16 @@ python web\app.py
 ```
 顶部工作栏   → WebSocket 状态、核心引擎标识
 左侧配置面板 → 站点探测器 + 模板加载 + 渲染/翻页/字段配置 + 高级选项（代理/API/去重/并发/清洗/续爬/存储）
-右侧面板     → 数据统计条 + 任务状态 + 实时日志（终端风格）+ 结果表格（可下载 Excel）
+右侧面板     → 任务历史 + 数据统计条 + 任务状态 + 实时日志 + 结果表格（可下载 Excel）
 ```
 
 ### 2. 使用流程
 
 1. **站点探测**：输入 URL → 点「探测」→ 自动识别渲染方式/翻页类型/内容容器/字段候选 → 点击填入表单
 2. **加载模板**：直接选用内置模板（网上书店/名人名言/软科排名/淘宝）
-3. **提交爬取**：配置完成后点「开始爬取」→ 实时日志 + 结果表格
-4. **导出数据**：Excel / CSV / SQLite（开启 storage 后自动写库）
+3. **提交爬取**：配置完成后点「开始爬取」→ 实时日志 + 结果表格；运行中可取消
+4. **查看与恢复**：任务历史可查看状态、日志和失败页；网址翻页任务可续跑未完成页
+5. **导出数据**：Excel / CSV / SQLite（开启 storage 后自动写库）
 
 ### 3. 引擎直接调用（Python）
 
@@ -120,7 +121,7 @@ items = crawl(config)   # 返回 List[dict]，同时写 data/demo/{name}.xlsx(.c
 | `concurrency` / `detail_concurrency` | 1 | 翻页并发 / 详情页并发（按页号排序合并保序） |
 | `postprocess` | — | 字段清洗：`{字段: {strip/collapse_ws/lower/upper/digits_only/remove/regex_replace}}` |
 | `respect_robots` | false | robots.txt 合规检查（获取失败自动放行） |
-| `resume` | false | 断点续爬（按页存 `data/resume/{任务名}.jl`，重跑跳过已完成页） |
+| `resume` | false | 断点续爬（按目标和提取配置签名存 `data/resume/`，重跑复用已完成页） |
 | `storage` | — | SQLite：`{type:"sqlite", table:"items"}`（与 Excel/CSV 并存，幂等去重） |
 | `headless` / `user_agent` / `storage_state` | — | playwright 参数：无头/UA/登录态 cookie 文件 |
 
@@ -163,7 +164,7 @@ spider-framework/
 ├── monitor/                     # Prometheus 监控
 ├── storage/                     # 存储（PostgreSQL）
 ├── config/                      # 配置
-├── utils/                       # 工具（指纹/UA/日志）
+├── utils/                       # 工具（指纹/UA/日志/凭据脱敏）
 ├── scripts/                     # 辅助脚本
 │   ├── activate_spider.bat       #   环境激活
 │   ├── run_spider.bat            #   命令行爬虫启动
@@ -280,6 +281,12 @@ result = pipeline.llm_extract(
 4. **迭代4**：反爬加固（代理轮换/回退直连、robots 合规、字段后处理）
 5. **迭代5**：SQLite 持久化 + 断点续爬
 6. **迭代6**：站点指纹识别（探测器）+ 数据统计面板
+7. **迭代7**：辅助脚本归位与目录整理
+8. **迭代8**：JSON 接口直取 + stealth 修复
+9. **迭代9**：请求节流、断点隔离、配置校验与 Web 安全加固
+10. **迭代10**：SQLite 任务历史、取消、失败页记录和续跑/重跑
+11. **迭代11**：断点生命周期回收、并发批量落盘、内存任务淘汰、单元测试基线
+12. **迭代12**：存储/清洗正确性修复（中文列名消歧、复合唯一键迁移、过滤条件与重试退避）
 
 ## 目前的坑和注意事项
 

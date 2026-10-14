@@ -11,6 +11,8 @@ from typing import Optional
 from scrapy import signals
 from scrapy.downloadermiddlewares.retry import RetryMiddleware as ScrapyRetryMiddleware
 from scrapy.utils.response import response_status_message
+from twisted.internet import reactor
+from twisted.internet.task import deferLater
 
 from utils.fingerprint import random_ua, build_headers
 from utils.logger import get_logger
@@ -82,11 +84,21 @@ class SmartRetryMiddleware(ScrapyRetryMiddleware):
     智能重试中间件
     在 Scrapy 原生重试基础上增加：
     - 重试时自动换 UA
-    - 指数退避
+    - 真实指数退避（用 reactor 调度延迟后再重发）
     - 特定状态码不重试（404 等）
     """
 
     NO_RETRY_CODES = {404, 403, 410}
+
+    def process_response(self, request, response, spider):
+        """命中重试状态码时返回延迟重发请求；其余交给下游处理"""
+        if request.meta.get("dont_retry", False):
+            return response
+        if response.status in self.retry_http_codes:
+            retry = self._retry(request, response_status_message(response.status), spider)
+            if retry is not None:
+                return retry
+        return response
 
     def _retry(self, request, reason, spider):
         retries = request.meta.get("retry_times", 0) + 1
@@ -106,12 +118,12 @@ class SmartRetryMiddleware(ScrapyRetryMiddleware):
         # 换 UA
         retryreq.headers["User-Agent"] = random_ua()
 
-        # 指数退避
+        # 指数退避：download_latency 只是统计字段，写它不会真的等待，
+        # 这里用 twisted 调度器延迟 delay 秒后再返回该请求。
         delay = min(2 ** retries, 30)
-        retryreq.meta["download_latency"] = delay
         logger.info(f"第 {retries} 次重试 ({reason}): {request.url}，等待 {delay}s")
 
-        return retryreq
+        return deferLater(reactor, delay, lambda: retryreq)
 
 
 class CookieMiddleware:

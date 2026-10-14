@@ -125,33 +125,44 @@ class RuleEngine:
             return value
         return value
 
+    # 运算符按长度降序排列，保证 ">=" / "<=" 先于 ">" / "<" 匹配，避免拆错
+    CONDITION_OPS = ("contains", "==", "!=", ">=", "<=", ">", "<")
+
     def _eval_condition(self, data: Dict, condition: str) -> bool:
         """
         简单条件评估
-        支持: field == value, field != value, field > value, field contains value
+        支持: field == value, field != value, field >= value, field <= value,
+              field > value, field < value, field contains value
         """
         if not condition:
             return True
-        try:
-            # 简单解析：field op value
-            for op in ["==", "!=", ">=", "<=", ">", "<", "contains"]:
-                if op in condition:
-                    parts = condition.split(op, 1)
-                    field = parts[0].strip()
-                    value = parts[1].strip().strip("'\"")
-                    field_val = str(data.get(field, ""))
-                    if op == "==":
-                        return field_val == value
-                    elif op == "!=":
-                        return field_val != value
-                    elif op == ">":
-                        return float(field_val) > float(value)
-                    elif op == "<":
-                        return float(field_val) < float(value)
-                    elif op == "contains":
-                        return value in field_val
-        except Exception:
-            return True
+        for op in self.CONDITION_OPS:
+            if op not in condition:
+                continue
+            field, value = condition.split(op, 1)
+            field = field.strip()
+            value = value.strip().strip("'\"")
+            field_val = str(data.get(field, ""))
+            if op == "==":
+                return field_val == value
+            if op == "!=":
+                return field_val != value
+            if op == "contains":
+                return value in field_val
+            try:
+                left, right = float(field_val), float(value)
+            except (TypeError, ValueError):
+                # 非数值字段无法做大小比较，按保留处理（不静默丢弃）
+                logger.warning(f"条件无法按数值比较，按保留处理: {condition!r}")
+                return True
+            if op == ">=":
+                return left >= right
+            if op == "<=":
+                return left <= right
+            if op == ">":
+                return left > right
+            if op == "<":
+                return left < right
         return True
 
 

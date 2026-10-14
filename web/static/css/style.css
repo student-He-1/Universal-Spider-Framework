@@ -406,6 +406,17 @@ body::before {
 }
 .btn-icon { font-size: 16px; color: #06121a; transition: color 0.2s; }
 
+.crawl-actions {
+    display: flex;
+    gap: 10px;
+    max-width: 380px;
+}
+.crawl-actions .btn-large { flex: 1; max-width: none; }
+.crawl-actions .btn-secondary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .add-field-btn { margin-top: 8px; width: auto; padding: 8px 16px; }
 
 /* ================================================================
@@ -464,6 +475,67 @@ body::before {
     padding: 18px;
     overflow: hidden;
 }
+
+.task-history-section {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+.task-history-section .section-header { padding: 9px 14px; }
+.task-history-section .section-header h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+.task-history-list { max-height: 132px; overflow-y: auto; }
+.task-history-empty {
+    padding: 12px 14px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.task-history-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line);
+}
+.task-history-row:hover { background: var(--bg-elevated); }
+.task-history-main { min-width: 0; }
+.task-history-name {
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.task-history-meta {
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+}
+.task-history-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+.task-history-actions .btn-sm { padding: 5px 8px; }
+.task-status-pill {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 500;
+    vertical-align: 1px;
+}
+.task-status-pill.completed { color: var(--success); border-color: var(--success); }
+.task-status-pill.partial, .task-status-pill.failed { color: var(--error); border-color: var(--error); }
+.task-status-pill.running, .task-status-pill.cancelling { color: var(--warning); border-color: var(--warning); }
 
 /* ================================================================
    统计卡片行
@@ -538,6 +610,8 @@ body::before {
 
 .status-idle { color: var(--text-muted); }
 .status-idle::before { background: var(--text-muted); }
+.status-pending { color: var(--text-muted); }
+.status-pending::before { background: var(--text-muted); }
 
 .status-running {
     color: var(--warning);
@@ -553,6 +627,14 @@ body::before {
     color: var(--error);
 }
 .status-failed::before { background: var(--error); }
+.status-partial { color: var(--warning); }
+.status-partial::before { background: var(--warning); }
+.status-cancelled { color: var(--text-muted); }
+.status-cancelled::before { background: var(--text-muted); }
+.status-interrupted { color: var(--error); }
+.status-interrupted::before { background: var(--error); }
+.status-cancelling { color: var(--warning); }
+.status-cancelling::before { background: var(--warning); animation: pulse-dot 1.2s infinite; }
 
 @keyframes pulse-dot {
     0%, 100% { box-shadow: 0 0 0 0 rgba(210, 153, 34, 0.4); }

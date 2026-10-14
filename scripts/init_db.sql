@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS raw_data (
     status VARCHAR(32) NOT NULL DEFAULT 'crawled',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(url_hash)
+    UNIQUE(site_name, url_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_site ON raw_data(site_name);

@@ -213,15 +213,31 @@
                 </div>
             </section>
 
-            <!-- 开始按钮 -->
-            <button id="start-crawl" class="btn btn-primary btn-large">
-                <span class="btn-icon" aria-hidden="true">↗</span>
-                开始爬取
-            </button>
+            <!-- 开始 / 取消按钮 -->
+            <div class="crawl-actions">
+                <button id="start-crawl" class="btn btn-primary btn-large">
+                    <span class="btn-icon" aria-hidden="true">↗</span>
+                    开始爬取
+                </button>
+                <button id="cancel-crawl" class="btn btn-secondary btn-large" disabled>取消当前任务</button>
+            </div>
         </aside>
 
         <!-- 右侧：日志和结果 -->
         <main class="result-panel">
+
+            <section class="task-history-section">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <h3>任务历史</h3>
+                        <span class="api-hint">最近 50 个任务</span>
+                    </div>
+                    <button id="refresh-task-history" class="btn btn-ghost btn-sm">刷新</button>
+                </div>
+                <div id="task-history-list" class="task-history-list">
+                    <div class="task-history-empty">正在读取任务记录…</div>
+                </div>
+            </section>
 
             <!-- 统计卡片行 -->
             <div class="stats-row">

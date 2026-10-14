@@ -34,9 +34,13 @@
 import re
 import time
 import random
+import math
+import hashlib
+import json
+import threading
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import parsel
 
@@ -50,6 +54,63 @@ CHALLENGE_MARKERS = [
     "__jschl", "renderData", "just-a-moment", "验证码", "captcha",
     "waf-pass", "sec_verify", "JSESSIONID", "window._signature",
 ]
+
+# 请求节流在同一进程内按主机共享，避免并发翻页或多个任务把 delay 变成空配置。
+_PACE_LOCK = threading.Lock()
+_NEXT_REQUEST_AT: Dict[str, float] = {}
+
+# robots.txt 解析结果短时缓存，避免每一页都重新请求。
+_ROBOTS_CACHE: Dict[tuple, tuple] = {}
+_ROBOTS_LOCK = threading.Lock()
+_ROBOTS_HOST_LOCKS: Dict[str, threading.Lock] = {}
+
+# Checkpoint updates can be written by multiple page workers in one process.
+_CHECKPOINT_LOCKS: Dict[str, threading.Lock] = {}
+_CHECKPOINT_LOCKS_GUARD = threading.Lock()
+
+
+def _host_key(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if not host:
+        return ""
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    return f"{host}:{port}" if port and port != default_port else host
+
+
+def _wait_for_request_slot(url: str, interval: float, cancel_event=None) -> bool:
+    """Reserve a per-host request slot, including requests made by worker threads."""
+    try:
+        interval = max(0.0, float(interval or 0))
+    except (TypeError, ValueError):
+        interval = 0.0
+    host = _host_key(url)
+    if not host or interval <= 0:
+        return not (cancel_event is not None and cancel_event.is_set())
+
+    now = time.monotonic()
+    with _PACE_LOCK:
+        slot = max(now, _NEXT_REQUEST_AT.get(host, now))
+        _NEXT_REQUEST_AT[host] = slot + interval
+    wait = slot - now
+    if wait > 0:
+        if cancel_event is not None:
+            if cancel_event.wait(wait):
+                return False
+        else:
+            time.sleep(wait)
+    return not (cancel_event is not None and cancel_event.is_set())
+
+
+def _sleep_or_cancel(seconds: float, cancel_event=None) -> bool:
+    if cancel_event is not None:
+        return not cancel_event.wait(max(0.0, seconds))
+    time.sleep(max(0.0, seconds))
+    return True
 
 # ================================================================
 # 工具函数
@@ -84,10 +145,16 @@ def _looks_like_challenge(html: str, content_type: str = "") -> bool:
 def _download_direct(url: str, requester, retries: int = 2,
                      log_callback: Optional[Callable] = None,
                      base_wait: float = 2.0, proxy: Optional[str] = None,
-                     proxies: Optional[List[str]] = None) -> str:
+                     proxies: Optional[List[str]] = None,
+                     request_delay: float = 0.0,
+                     headers: Optional[Dict[str, str]] = None,
+                     cancel_event=None) -> str:
     """direct 渲染：用 curl_cffi 下载网页（指数退避 + 随机抖动重试，支持代理轮换）"""
     pool = proxies or ([proxy] if proxy else None)
-    return _fetch_with_proxy_rotation(url, requester, pool, retries, log_callback, base_wait)
+    return _fetch_with_proxy_rotation(
+        url, requester, pool, retries, log_callback, base_wait,
+        request_delay=request_delay, headers=headers, cancel_event=cancel_event,
+    )
 
 
 def _parse_proxies(cfg: Dict) -> List[str]:
@@ -127,7 +194,8 @@ def _pick_proxy(proxies: List[str], failed: Optional[set] = None) -> Optional[st
 
 
 def _fetch_with_proxy_rotation(url, requester, proxies, retries, log_callback, base_wait=2.0,
-                               fallback_direct=True):
+                               fallback_direct=True, request_delay=0.0, headers=None,
+                               cancel_event=None):
     """
     direct 请求软代理轮换：按重试次数轮换代理 + 指数退避 + 随机抖动。
     比单代理更抗封：一个代理失败就换下一个；全部失败后可回退直连（fallback_direct）。
@@ -142,9 +210,13 @@ def _fetch_with_proxy_rotation(url, requester, proxies, retries, log_callback, b
     # 有代理 → 先全用代理轮换
     if proxies:
         for attempt in range(retries + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                return ""
             proxy = _pick_proxy(proxies, failed)
             try:
-                result = requester.get(url, timeout=20, proxy=proxy)
+                if not _wait_for_request_slot(url, request_delay, cancel_event):
+                    return ""
+                result = requester.get(url, timeout=20, proxy=proxy, headers=headers)
                 if result.status_code == 200 and result.text:
                     return result.text
                 last_err = f"状态码 {result.status_code}"
@@ -155,13 +227,18 @@ def _fetch_with_proxy_rotation(url, requester, proxies, retries, log_callback, b
                 failed.add(proxy)
                 _log(f"    代理 {proxy} 出错：{e}，切换下一个")
             wait = base_wait * (2 ** attempt) + random.uniform(0, 1)
-            time.sleep(wait)
+            if not _sleep_or_cancel(wait, cancel_event):
+                return ""
         # 全部代理都失败
         if fallback_direct:
             _log(f"    代理均不可用，回退直连重试...")
             for attempt in range(retries + 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    return ""
                 try:
-                    result = requester.get(url, timeout=20)
+                    if not _wait_for_request_slot(url, request_delay, cancel_event):
+                        return ""
+                    result = requester.get(url, timeout=20, headers=headers)
                     if result.status_code == 200 and result.text:
                         return result.text
                     last_err = f"状态码 {result.status_code}"
@@ -170,14 +247,19 @@ def _fetch_with_proxy_rotation(url, requester, proxies, retries, log_callback, b
                     last_err = str(e)
                     _log(f"    [直连重试 {attempt+1}/{retries+1}] {url} 出错：{e}")
                 wait = base_wait * (2 ** attempt) + random.uniform(0, 1)
-                time.sleep(wait)
+                if not _sleep_or_cancel(wait, cancel_event):
+                    return ""
         _log(f"    所有代理及直连均失败（{last_err}），放弃")
         return ""
 
     # 无代理 → 原逻辑（指数退避 + 随机抖动）
     for attempt in range(retries + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            return ""
         try:
-            result = requester.get(url, timeout=20)
+            if not _wait_for_request_slot(url, request_delay, cancel_event):
+                return ""
+            result = requester.get(url, timeout=20, headers=headers)
             if result.status_code == 200 and result.text:
                 return result.text
             last_err = f"状态码 {result.status_code}"
@@ -186,7 +268,8 @@ def _fetch_with_proxy_rotation(url, requester, proxies, retries, log_callback, b
             last_err = str(e)
             _log(f"    [重试 {attempt+1}/{retries+1}] {url} 出错：{e}")
         wait = base_wait * (2 ** attempt) + random.uniform(0, 1)
-        time.sleep(wait)
+        if not _sleep_or_cancel(wait, cancel_event):
+            return ""
     _log(f"    请求失败（{last_err}），放弃")
     return ""
 
@@ -194,33 +277,88 @@ def _fetch_with_proxy_rotation(url, requester, proxies, retries, log_callback, b
 def _robots_allowed(url: str, cfg: Dict, log_callback=None) -> bool:
     """
     robots.txt 合规检查（默认关闭；cfg['respect_robots'] 为 True 时启用）。
-    无法获取 robots.txt → 放行（不因检查失败阻塞爬取）。
+    结果按站点和 User-Agent 缓存；超时或无法获取时按现有策略放行。
     """
     if not cfg.get("respect_robots"):
         return True
     try:
+        import urllib.request
         from urllib.robotparser import RobotFileParser
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
+        from urllib.parse import urlsplit
+        parsed = urlsplit(url)
         if parsed.scheme not in ("http", "https"):
             return True
         base = f"{parsed.scheme}://{parsed.netloc}"
-        rp = RobotFileParser()
-        fetched = False
-        for attempt in range(2):
+        custom_headers = cfg.get("headers") or {}
+        ua = str(cfg.get("user_agent") or custom_headers.get("User-Agent") or "*")
+        cache_key = (base, ua)
+        now = time.monotonic()
+        cached = _ROBOTS_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            rp = cached[1]
+            return rp.can_fetch(ua, url) if rp is not None else True
+
+        with _ROBOTS_LOCK:
+            host_lock = _ROBOTS_HOST_LOCKS.setdefault(base, threading.Lock())
+        with host_lock:
+            now = time.monotonic()
+            cached = _ROBOTS_CACHE.get(cache_key)
+            if cached and cached[0] > now:
+                rp = cached[1]
+                return rp.can_fetch(ua, url) if rp is not None else True
+
+            robots_url = base + "/robots.txt"
+            timeout = min(max(float(cfg.get("robots_timeout", 5)), 0.5), 20.0)
+            req = urllib.request.Request(robots_url, headers={"User-Agent": ua})
             try:
-                rp.set_url(base + "/robots.txt")
-                rp.read()
-                fetched = True
-                break
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    body = response.read(512 * 1024).decode("utf-8", errors="replace")
+                rp = RobotFileParser()
+                rp.set_url(robots_url)
+                rp.parse(body.splitlines())
+                _ROBOTS_CACHE[cache_key] = (time.monotonic() + 300, rp)
+                return rp.can_fetch(ua, url)
             except Exception:
-                time.sleep(1)
-        if not fetched:
-            return True  # 拿不到就放行，避免阻塞
-        ua = cfg.get("user_agent", "*")
-        return rp.can_fetch(ua, url)
+                # 保持兼容：robots 服务异常时不阻断采集，但缓存短暂失败结果，避免每页重试。
+                _ROBOTS_CACHE[cache_key] = (time.monotonic() + 60, None)
+                return True
     except Exception:
         return True
+
+
+def _install_playwright_request_policy(page, cfg: Dict, log_callback=None) -> None:
+    """Apply robots checks to browser document/API requests."""
+    def _route(route):
+        request = route.request
+        resource_type = request.resource_type
+        if cfg.get("respect_robots") and resource_type in ("document", "xhr", "fetch"):
+            if not _robots_allowed(request.url, cfg, log_callback):
+                if log_callback:
+                    log_callback(f"[robots.txt] 禁止请求：{request.url}")
+                route.abort()
+                return
+        route.continue_()
+
+    page.route("**/*", _route)
+
+
+def _goto_with_pacing(page, url: str, cfg: Dict, **kwargs):
+    """Pace browser navigations without blocking Playwright's route event loop."""
+    if not _wait_for_request_slot(url, cfg.get("delay", 0.5), cfg.get("_cancel_event")):
+        return None
+    return page.goto(url, **kwargs)
+
+
+def _wait_playwright_page(page, milliseconds: int, cancel_event=None) -> bool:
+    """Wait in short slices so a task cancellation is noticed promptly."""
+    deadline = time.monotonic() + max(0, milliseconds) / 1000
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        page.wait_for_timeout(min(250, max(1, int(remaining * 1000))))
 
 
 def _apply_postprocess(row: Dict, rules: Dict) -> Dict:
@@ -344,7 +482,25 @@ def _row_fingerprint(vals, cols):
 
 def _checkpoint_path(cfg: Dict, name: str) -> Path:
     project_root = Path(__file__).resolve().parent.parent
-    return project_root / "data" / "resume" / f"{_safe_name(name)}.jl"
+    # A checkpoint is reusable only when its source and extraction contract match.
+    relevant = {
+        "version": 2,
+        "render": cfg.get("render", "direct"),
+        "first_url": cfg.get("first_url"),
+        "pagination": cfg.get("pagination", {}),
+        "item_selector": cfg.get("item_selector"),
+        "fields": cfg.get("fields", {}),
+        "api": cfg.get("api", {}),
+        "headers": cfg.get("headers", {}),
+        "user_agent": cfg.get("user_agent"),
+        "storage_state": cfg.get("storage_state"),
+        "page_wait": cfg.get("page_wait"),
+        "checkpoint_scope": cfg.get("_checkpoint_scope"),
+    }
+    signature = json.dumps(relevant, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), default=str)
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
+    return project_root / "data" / "resume" / f"{_safe_name(name)}-{digest}.jl"
 
 
 def _load_checkpoint(cfg: Dict, name: str) -> Dict[int, List[Dict]]:
@@ -354,7 +510,6 @@ def _load_checkpoint(cfg: Dict, name: str) -> Dict[int, List[Dict]]:
     path = _checkpoint_path(cfg, name)
     if not path.exists():
         return {}
-    import json as _json
     out: Dict[int, List[Dict]] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -362,48 +517,123 @@ def _load_checkpoint(cfg: Dict, name: str) -> Dict[int, List[Dict]]:
                 line = line.strip()
                 if not line:
                     continue
-                rec = _json.loads(line)
-                out[int(rec["page"])] = rec["items"]
+                try:
+                    rec = json.loads(line)
+                    page = int(rec["page"])
+                    items = rec["items"]
+                    if page >= 1 and isinstance(items, list) and all(isinstance(x, dict) for x in items):
+                        out[page] = items
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                    continue
     except Exception:
         pass
     return out
 
 
+def _checkpoint_lock_for(path: Path) -> threading.Lock:
+    """取（或创建）某个断点文件对应的进程内锁"""
+    with _CHECKPOINT_LOCKS_GUARD:
+        return _CHECKPOINT_LOCKS.setdefault(str(path.resolve()), threading.Lock())
+
+
+def _atomic_write_checkpoint(path: Path, recs: Dict[int, List[Dict]]) -> None:
+    """原子落盘断点：临时文件 → fsync → os.replace，异常清理临时文件。"""
+    temp_path = None
+    try:
+        import tempfile
+        import os
+        fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for p in sorted(recs):
+                f.write(json.dumps({"page": p, "items": recs[p]}, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _checkpoint_enabled(cfg: Dict) -> bool:
+    return bool(cfg.get("resume") or cfg.get("_checkpoint_write"))
+
+
 def _save_checkpoint(cfg: Dict, name: str, page: int, items: List[Dict], all_results: List[Dict]):
     """
     断点续爬：把已完成页结果持久化（JSON Lines 一行一页）。
-    重复写同页以最后一次为准，通过先删同页行再追加实现。
+    同一页重复写入时以最后一次为准，并通过临时文件原子替换。
     """
-    if not cfg.get("resume"):
+    if not _checkpoint_enabled(cfg):
         return
-    import json as _json
-    path = _checkpoint_path(cfg, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # 读现有行并去重同页
-        recs = {}
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        r = _json.loads(line)
-                        recs[int(r["page"])] = r["items"]
-                    except Exception:
-                        pass
+        path = _checkpoint_path(cfg, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ck_lock = _checkpoint_lock_for(path)
+    except Exception:
+        return
+    with ck_lock:
+        recs = _load_checkpoint({**cfg, "resume": True}, name)
         recs[page] = items
-        with open(path, "w", encoding="utf-8") as f:
-            for p in sorted(recs):
-                f.write(_json.dumps({"page": p, "items": recs[p]}, ensure_ascii=False) + "\n")
+        _atomic_write_checkpoint(path, recs)
+
+
+def _save_checkpoints(cfg: Dict, name: str, pages: Dict[int, List[Dict]]):
+    """
+    批量落盘多页断点：一次读取 + 一次原子写入。
+    并发翻页场景用它替代逐页 _save_checkpoint，避免 N 次全量重写（O(n²) I/O）。
+    """
+    if not pages or not _checkpoint_enabled(cfg):
+        return
+    try:
+        path = _checkpoint_path(cfg, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ck_lock = _checkpoint_lock_for(path)
+    except Exception:
+        return
+    with ck_lock:
+        recs = _load_checkpoint({**cfg, "resume": True}, name)
+        recs.update({int(p): v for p, v in pages.items()})
+        _atomic_write_checkpoint(path, recs)
+
+
+def _clear_checkpoint(cfg: Dict, name: str) -> bool:
+    """
+    删除断点文件（任务成功后调用），避免 data/resume 随任务数无限累积。
+    同时清理该断点可能残留的临时文件。
+    """
+    try:
+        path = _checkpoint_path(cfg, name)
+    except Exception:
+        return False
+    removed = False
+    try:
+        if path.exists():
+            path.unlink()
+            removed = True
+    except Exception:
+        removed = False
+    try:
+        for tmp in path.parent.glob(path.name + ".*.tmp"):
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
     except Exception:
         pass
+    return removed
 
 
 def _normalize_config(config: Dict) -> Dict:
+    if not isinstance(config, dict):
+        raise ValueError("爬取配置必须是 JSON 对象")
     cfg = dict(config)
     cfg.setdefault("render", "direct")
+    if cfg["render"] not in ("direct", "playwright"):
+        raise ValueError("render 只能是 direct 或 playwright")
     if "pagination" not in cfg:
         pg = {}
         if cfg.get("page_url_pattern"):
@@ -414,9 +644,151 @@ def _normalize_config(config: Dict) -> Dict:
         else:
             pg["type"] = "none"
         cfg["pagination"] = pg
-    cfg["pagination"].setdefault("max_pages", 999)
-    cfg["pagination"].setdefault("start_page", 1)
-    cfg.setdefault("delay", 0.5)
+    if not isinstance(cfg["pagination"], dict):
+        raise ValueError("pagination 必须是 JSON 对象")
+    pg = dict(cfg["pagination"])
+    cfg["pagination"] = pg
+    pg.setdefault("type", "none")
+    if pg["type"] not in ("none", "url_pattern", "next_button", "infinite_scroll"):
+        raise ValueError("不支持的 pagination.type")
+    if cfg["render"] == "direct" and pg["type"] in ("next_button", "infinite_scroll"):
+        raise ValueError(f"{pg['type']} 翻页必须使用 playwright 渲染")
+    try:
+        pg["start_page"] = int(pg.get("start_page", 1))
+        pg["max_pages"] = int(pg.get("max_pages", 1))
+        cfg["concurrency"] = int(cfg.get("concurrency", 1) or 1)
+        cfg["delay"] = float(cfg.get("delay", 0.5))
+        cfg["page_wait"] = int(cfg.get("page_wait", 3000))
+        cfg["detail_concurrency"] = int(cfg.get("detail_concurrency", 1) or 1)
+        cfg["robots_timeout"] = float(cfg.get("robots_timeout", 5))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("页码、页数、并发数、延时和等待时间必须是有效数字")
+    if pg["start_page"] < 1 or pg["max_pages"] < 1 or pg["max_pages"] > 10000:
+        raise ValueError("start_page 必须大于等于 1，max_pages 必须在 1 到 10000 之间")
+    if cfg["concurrency"] < 1 or cfg["concurrency"] > 20:
+        raise ValueError("concurrency 必须在 1 到 20 之间")
+    if not math.isfinite(cfg["delay"]) or cfg["delay"] < 0 or cfg["delay"] > 3600:
+        raise ValueError("delay 必须在 0 到 3600 秒之间")
+    if cfg["page_wait"] < 0 or cfg["page_wait"] > 120000:
+        raise ValueError("page_wait 必须在 0 到 120000 毫秒之间")
+    if cfg["detail_concurrency"] < 1 or cfg["detail_concurrency"] > 20:
+        raise ValueError("detail_concurrency 必须在 1 到 20 之间")
+    if not math.isfinite(cfg["robots_timeout"]) or not 0.5 <= cfg["robots_timeout"] <= 20:
+        raise ValueError("robots_timeout 必须在 0.5 到 20 秒之间")
+    cfg["name"] = str(cfg.get("name") or "result").strip() or "result"
+    first_url = cfg.get("first_url")
+
+    def _validate_http_url(value, label):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} 必须是有效的 http 或 https URL")
+        try:
+            parsed = urlsplit(value.strip())
+            hostname = parsed.hostname
+            parsed.port  # Force validation of malformed ports.
+        except ValueError as exc:
+            raise ValueError(f"{label} 必须是有效的 http 或 https URL") from exc
+        if parsed.scheme not in ("http", "https") or not hostname:
+            raise ValueError(f"{label} 必须是有效的 http 或 https URL")
+        return value.strip()
+
+    if first_url:
+        cfg["first_url"] = _validate_http_url(first_url, "first_url")
+    if pg["type"] == "url_pattern":
+        pattern = pg.get("url_pattern")
+        if not isinstance(pattern, str) or "{page}" not in pattern:
+            raise ValueError("url_pattern 翻页必须包含 {page}")
+        try:
+            sample_url = pattern.format(page=pg["start_page"])
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("url_pattern 只应使用 {page} 作为格式占位符") from exc
+        _validate_http_url(sample_url, "url_pattern")
+    elif pg.get("url_pattern"):
+        # `none` historically also accepts a single formatted URL pattern.
+        try:
+            sample_url = str(pg["url_pattern"]).format(page=pg["start_page"])
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("url_pattern 只应使用 {page} 作为格式占位符") from exc
+        pg["url_pattern"] = _validate_http_url(sample_url, "url_pattern")
+    if pg["type"] == "none" and not first_url and not pg.get("url_pattern"):
+        raise ValueError("单页任务必须填写 first_url")
+    if pg["type"] in ("next_button", "infinite_scroll") and not first_url:
+        raise ValueError(f"{pg['type']} 翻页必须填写 first_url")
+    if cfg.get("fields") is not None and not isinstance(cfg.get("fields"), dict):
+        raise ValueError("fields 必须是对象")
+    cfg["fields"] = cfg.get("fields") or {}
+    if any(not isinstance(key, str) or not key.strip()
+           or not isinstance(value, str) or not value.strip()
+           for key, value in cfg["fields"].items()):
+        raise ValueError("fields 的列名和选择器必须是非空字符串")
+    if cfg.get("api") is not None and not isinstance(cfg.get("api"), dict):
+        raise ValueError("api 必须是对象")
+    api_fields = (cfg.get("api") or {}).get("fields")
+    if api_fields is not None and (
+        not isinstance(api_fields, dict)
+        or any(not isinstance(key, str) or not isinstance(value, str)
+               for key, value in api_fields.items())
+    ):
+        raise ValueError("api.fields 必须是字符串到字符串的对象")
+    if cfg.get("headers") is not None and not isinstance(cfg.get("headers"), dict):
+        raise ValueError("headers 必须是对象")
+    cfg["headers"] = dict(cfg.get("headers") or {})
+    if any(not isinstance(key, str) or not isinstance(value, str)
+           or not key.strip() or "\r" in key or "\n" in key
+           or "\r" in value or "\n" in value
+           for key, value in cfg["headers"].items()):
+        raise ValueError("headers 必须使用无换行的字符串键和值")
+    if cfg.get("item_selector") is not None and not isinstance(cfg.get("item_selector"), str):
+        raise ValueError("item_selector 必须是字符串")
+    selector = (cfg.get("item_selector") or "").strip()
+    if not selector and cfg["fields"]:
+        raise ValueError("配置了 HTML 字段时必须填写 item_selector")
+    cfg["item_selector"] = selector or "body"
+    if cfg.get("user_agent") is not None and not isinstance(cfg.get("user_agent"), str):
+        raise ValueError("user_agent 必须是字符串")
+    for proxy_key in ("proxy", "proxies"):
+        proxy_value = cfg.get(proxy_key)
+        if proxy_value is not None and not isinstance(proxy_value, (str, list)):
+            raise ValueError(f"{proxy_key} 必须是字符串或字符串列表")
+        if isinstance(proxy_value, list) and any(not isinstance(item, str) for item in proxy_value):
+            raise ValueError(f"{proxy_key} 列表中的代理地址必须是字符串")
+    if cfg.get("proxy_file") is not None and not isinstance(cfg.get("proxy_file"), str):
+        raise ValueError("proxy_file 必须是字符串路径")
+    header_ua = next(
+        (value for key, value in cfg["headers"].items() if key.lower() == "user-agent"),
+        None,
+    )
+    user_agent = (cfg.get("user_agent") or header_ua or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    )).strip()
+    if not user_agent or "\r" in user_agent or "\n" in user_agent:
+        raise ValueError("user_agent 不能为空且不能包含换行")
+    cfg["user_agent"] = user_agent
+    cfg["headers"] = {
+        key: value for key, value in cfg["headers"].items()
+        if key.lower() != "user-agent"
+    }
+    cfg["headers"]["User-Agent"] = user_agent
+    for key in ("storage", "detail", "dedup", "postprocess"):
+        if cfg.get(key) is not None and not isinstance(cfg.get(key), dict):
+            raise ValueError(f"{key} 必须是对象")
+    detail_fields = (cfg.get("detail") or {}).get("fields")
+    if detail_fields is not None and (
+        not isinstance(detail_fields, dict)
+        or any(not isinstance(key, str) or not isinstance(value, str)
+               for key, value in detail_fields.items())
+    ):
+        raise ValueError("detail.fields 必须是字符串到字符串的对象")
+    if pg["type"] == "infinite_scroll":
+        try:
+            pg["scroll_pause"] = float(pg.get("scroll_pause", 1.5))
+            pg["max_scrolls"] = int(pg.get("max_scrolls", 50))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("scroll_pause 和 max_scrolls 必须是有效数字") from exc
+        if not math.isfinite(pg["scroll_pause"]) or not 0 <= pg["scroll_pause"] <= 3600:
+            raise ValueError("scroll_pause 必须在 0 到 3600 秒之间")
+        if not 1 <= pg["max_scrolls"] <= 10000:
+            raise ValueError("max_scrolls 必须在 1 到 10000 之间")
     return cfg
 
 
@@ -695,6 +1067,8 @@ def _render_with_playwright(url: str, config: Dict, log_callback: Optional[Calla
             return ""
 
         ctx_kwargs = {"viewport": {"width": 1400, "height": 900}, "user_agent": ua}
+        if config.get("headers"):
+            ctx_kwargs["extra_http_headers"] = config["headers"]
         if storage_state and os.path.exists(storage_state):
             ctx_kwargs["storage_state"] = storage_state
             _log(f"  已加载登录态: {storage_state}")
@@ -702,10 +1076,11 @@ def _render_with_playwright(url: str, config: Dict, log_callback: Optional[Calla
 
         page = context.new_page()
         _apply_stealth(page, log_callback)
+        _install_playwright_request_policy(page, config, log_callback)
 
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(config.get("page_wait", 3000))
+            _goto_with_pacing(page, url, config, wait_until="domcontentloaded", timeout=30000)
+            _wait_playwright_page(page, config.get("page_wait", 3000), config.get("_cancel_event"))
             return page.content()
         except Exception as e:
             _log(f"  [错误] Playwright 渲染失败：{e}")
@@ -848,7 +1223,9 @@ def probe_site(url: str, config: Optional[Dict] = None,
 # 主入口：按配置爬取
 # ================================================================
 def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None,
-          log_callback: Optional[Callable[[str], None]] = None) -> List[Dict]:
+          log_callback: Optional[Callable[[str], None]] = None,
+          cancel_event: Optional[threading.Event] = None,
+          page_callback: Optional[Callable[..., None]] = None) -> List[Dict]:
     """
     按配置爬取一个网站（自动选择渲染方式和翻页策略），返回结果并存 Excel。
 
@@ -865,7 +1242,18 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
         else:
             print(msg)
 
+    def _cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+
+    def _report_page(page_no, status, count=0, error=""):
+        if page_callback:
+            try:
+                page_callback(int(page_no), str(status), int(count), str(error or ""))
+            except Exception as exc:
+                _log(f"[任务状态] 页面状态回调失败：{exc}")
+
     cfg = _normalize_config(config)
+    cfg["_cancel_event"] = cancel_event
     name = cfg.get("name", "result")
     render = cfg["render"]
     pg = cfg["pagination"]
@@ -899,11 +1287,27 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
         if pg["type"] == "none":
             url = cfg.get("first_url") or pg.get("url_pattern", "").format(page=pg["start_page"])
             _log(f"[单页] {url}")
-            html = _fetch_with_challenge_fallback(url, cfg, requester, log_callback, proxies)
-            items = _extract_items_from_json(html, cfg)
-            if items is None:
-                items = _extract_items_from_html(html, cfg)
+            if _cancelled():
+                _report_page(1, "cancelled")
+                return []
+            _report_page(1, "running")
+            html = _fetch_with_challenge_fallback(
+                url, cfg, requester, log_callback, proxies,
+                request_delay=delay,
+            )
+            if not html:
+                _report_page(1, "cancelled" if _cancelled() else "failed",
+                             error="" if _cancelled() else "页面下载失败或被 robots.txt 阻止")
+                return []
+            try:
+                items = _extract_items_from_json(html, cfg)
+                if items is None:
+                    items = _extract_items_from_html(html, cfg)
+            except Exception as exc:
+                _report_page(1, "failed", error=str(exc))
+                raise
             _log(f"    找到 {len(items)} 条")
+            _report_page(1, "completed" if items else "empty", len(items))
             all_results.extend(items)
 
         elif pg["type"] == "url_pattern":
@@ -912,23 +1316,36 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
             checkpoint = _load_checkpoint(cfg, name)   # {页号: items}
 
             def _fetch_page(pno: int):
-                """抓单页，返回 (页号, 条目)。失败返回 (pno, [])"""
+                """抓单页，返回页号、条目与状态；失败页不会进入续爬检查点。"""
+                if _cancelled():
+                    _report_page(pno, "cancelled")
+                    return pno, [], "cancelled"
+                _report_page(pno, "running")
                 url = pg["url_pattern"].format(page=pno)
-                if not _robots_allowed(url, cfg, log_callback):
-                    _log(f"[第 {pno} 页] robots.txt 禁止抓取，跳过 {url}")
-                    return pno, []
-                html = _fetch_with_challenge_fallback(url, cfg, requester, log_callback, proxies)
-                if not html:
-                    _log(f"[第 {pno} 页] 下载失败，返回空")
-                    return pno, []
-                items = _extract_items_from_json(html, cfg)
-                if items is None:
-                    items = _extract_items_from_html(html, cfg)
-                return pno, items
+                try:
+                    html = _fetch_with_challenge_fallback(
+                        url, cfg, requester, log_callback, proxies,
+                        request_delay=delay,
+                    )
+                    if not html:
+                        if _cancelled():
+                            _report_page(pno, "cancelled")
+                            return pno, [], "cancelled"
+                        _log(f"[第 {pno} 页] 下载失败，返回空")
+                        _report_page(pno, "failed", error="页面下载失败或被 robots.txt 阻止")
+                        return pno, [], "failed"
+                    items = _extract_items_from_json(html, cfg)
+                    if items is None:
+                        items = _extract_items_from_html(html, cfg)
+                    status = "completed" if items else "empty"
+                    _report_page(pno, status, len(items))
+                    return pno, items, status
+                except Exception as exc:
+                    _log(f"[第 {pno} 页] 抓取失败：{exc}")
+                    _report_page(pno, "failed", error=str(exc))
+                    return pno, [], "failed"
 
             if concurrency > 1:
-                import threading
-                ck_lock = threading.Lock()
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 page_items: Dict[int, List[Dict]] = {}
                 # 断点：已完成的页直接用 checkpoint 恢复，不重复下载
@@ -937,42 +1354,50 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
                     if resume and p0 in checkpoint:
                         page_items[p0] = checkpoint[p0]
                         _log(f"[第 {p0} 页] 已爬过（断点），直接复用 {len(checkpoint[p0])} 条")
+                        _report_page(p0, "reused", len(checkpoint[p0]))
                     else:
                         pending_pnos.append(p0)
                 _log(f"[并发] url_pattern 翻页并发 {concurrency} 线程，待抓 {len(pending_pnos)} 页")
                 if pending_pnos:
+                    to_checkpoint: Dict[int, List[Dict]] = {}
                     with ThreadPoolExecutor(max_workers=concurrency) as ex:
                         futures = {ex.submit(_fetch_page, p): p for p in pending_pnos}
                         for fut in as_completed(futures):
-                            pno, items = fut.result()
+                            pno, items, page_status = fut.result()
                             page_items[pno] = items
                             _log(f"[第 {pno} 页] 找到 {len(items)} 条")
-                            if resume and items:
-                                with ck_lock:
-                                    _save_checkpoint(cfg, name, pno, items, all_results)
+                            if page_status in ("completed", "empty") and _checkpoint_enabled(cfg):
+                                to_checkpoint[pno] = items
+                    # 批量落盘：一次读取 + 一次原子写入（替代逐页各写一次的全量重写）
+                    _save_checkpoints(cfg, name, to_checkpoint)
                 # 按页号排序合并，保证输出顺序稳定（不随并发完成顺序乱序）
                 for pno in sorted(page_items):
                     all_results.extend(page_items.get(pno, []))
-                    time.sleep(delay)
             else:
                 page = pg["start_page"]
                 pages_done = 0
                 while pages_done < pg["max_pages"]:
+                    if _cancelled():
+                        break
                     if resume and page in checkpoint:
                         items = checkpoint[page]
                         _log(f"[第 {page} 页] 已爬过（断点），直接复用 {len(items)} 条")
+                        _report_page(page, "reused", len(items))
                     else:
-                        pno, items = _fetch_page(page)
+                        pno, items, page_status = _fetch_page(page)
                         _log(f"[第 {page} 页] 找到 {len(items)} 条")
-                        if items and resume:
+                        if page_status in ("completed", "empty"):
                             _save_checkpoint(cfg, name, page, items, all_results)
+                        if page_status == "failed":
+                            break
+                        if page_status == "cancelled":
+                            break
                     if not items:
                         _log("    本页无内容，停止（可能已到最后一页）")
                         break
                     all_results.extend(items)
                     pages_done += 1
                     page += 1
-                    time.sleep(delay)
         else:
             _log(f"  [错误] direct 渲染不支持翻页策略 '{pg['type']}'，请改用 render='playwright'")
             return []
@@ -984,7 +1409,7 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
         from playwright.sync_api import sync_playwright
 
         first_url = cfg.get("first_url") or pg.get("url_pattern", "").format(page=pg["start_page"])
-        ua = cfg.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        ua = cfg["user_agent"]
         storage_state = cfg.get("storage_state")
         proxy = (proxies or [cfg.get("proxy")])[0] if (proxies or cfg.get("proxy")) else None
         headless = cfg.get("headless", True)
@@ -1000,6 +1425,8 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
                 _log(f"  [错误] 浏览器启动失败（可能是代理不可用）：{e}")
                 return []
             ctx_kwargs = {"viewport": {"width": 1400, "height": 900}, "user_agent": ua}
+            if cfg.get("headers"):
+                ctx_kwargs["extra_http_headers"] = cfg["headers"]
             if storage_state and os.path.exists(storage_state):
                 ctx_kwargs["storage_state"] = storage_state
                 _log(f"  已加载登录态: {storage_state}")
@@ -1007,6 +1434,7 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
 
             page = context.new_page()
             _apply_stealth(page, _log)
+            _install_playwright_request_policy(page, cfg, _log)
 
             # ---------- XHR/API 响应捕获（可选）----------
             # 若配置了 api，则监听页面所有 JSON 响应并缓存，提取阶段优先用接口数据
@@ -1040,51 +1468,109 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
 
             if pg["type"] == "none":
                 _log(f"[单页] {first_url}")
-                page.goto(first_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(cfg.get("page_wait", 3000))
-                items, _ = _pick_items(1)
-                _log(f"    找到 {len(items)} 条")
-                all_results.extend(items)
+                if _cancelled():
+                    _report_page(1, "cancelled")
+                else:
+                    _report_page(1, "running")
+                    try:
+                        _goto_with_pacing(page, first_url, cfg, wait_until="domcontentloaded", timeout=30000)
+                        if not _wait_playwright_page(page, cfg.get("page_wait", 3000), cancel_event):
+                            _report_page(1, "cancelled")
+                        else:
+                            items, _ = _pick_items(1)
+                            _log(f"    找到 {len(items)} 条")
+                            _report_page(1, "completed" if items else "empty", len(items))
+                            all_results.extend(items)
+                    except Exception as exc:
+                        _report_page(1, "failed", error=str(exc))
+                        raise
 
             elif pg["type"] == "url_pattern":
                 page_num = pg["start_page"]
                 pages_done = 0
+                resume = bool(cfg.get("resume"))
+                checkpoint = _load_checkpoint(cfg, name)
                 while pages_done < pg["max_pages"]:
+                    if _cancelled():
+                        break
+                    if resume and page_num in checkpoint:
+                        items = checkpoint[page_num]
+                        _report_page(page_num, "reused", len(items))
+                        _log(f"[第 {page_num} 页] 已爬过（断点），直接复用 {len(items)} 条")
+                        if not items:
+                            break
+                        all_results.extend(items)
+                        pages_done += 1
+                        page_num += 1
+                        continue
                     url = pg["url_pattern"].format(page=page_num)
                     _log(f"[第 {page_num} 页] {url}")
+                    _report_page(page_num, "running")
                     try:
                         api_responses.clear()  # 每页单独收集接口响应
-                        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        page.wait_for_timeout(cfg.get("page_wait", 3000))
+                        _goto_with_pacing(page, url, cfg, wait_until="domcontentloaded", timeout=30000)
+                        if not _wait_playwright_page(page, cfg.get("page_wait", 3000), cancel_event):
+                            _report_page(page_num, "cancelled")
+                            break
                     except Exception as e:
                         _log(f"    [错误] 打开页面失败：{e}")
+                        _report_page(page_num, "failed", error=str(e))
                         break
-                    items, _ = _pick_items(page_num)
+                    try:
+                        items, _ = _pick_items(page_num)
+                    except Exception as exc:
+                        _log(f"    [错误] 提取第 {page_num} 页失败：{exc}")
+                        _report_page(page_num, "failed", error=str(exc))
+                        break
                     _log(f"    找到 {len(items)} 条")
+                    page_status = "completed" if items else "empty"
+                    _report_page(page_num, page_status, len(items))
+                    _save_checkpoint(cfg, name, page_num, items, all_results)
                     if not items:
                         _log("    本页无内容，停止")
                         break
                     all_results.extend(items)
                     pages_done += 1
                     page_num += 1
-                    time.sleep(delay)
 
             elif pg["type"] == "next_button":
                 _log(f"[第 1 页] {first_url}")
-                page.goto(first_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(cfg.get("page_wait", 3000))
+                if _cancelled():
+                    _report_page(1, "cancelled")
+                    browser.close()
+                    return []
+                _report_page(1, "running")
+                try:
+                    _goto_with_pacing(page, first_url, cfg, wait_until="domcontentloaded", timeout=30000)
+                except Exception as exc:
+                    _report_page(1, "failed", error=str(exc))
+                    raise
+                if not _wait_playwright_page(page, cfg.get("page_wait", 3000), cancel_event):
+                    _report_page(1, "cancelled")
+                    browser.close()
+                    return all_results
 
                 next_sel = pg.get("next_selector", "li.ant-pagination-next")
                 disabled_marker = pg.get("disabled_marker", "disabled")
 
                 page_num = 0
                 while page_num < pg["max_pages"]:
+                    if _cancelled():
+                        break
                     page_num += 1
-                    items = _extract_items_from_page(page, cfg)
+                    try:
+                        items = _extract_items_from_page(page, cfg)
+                    except Exception as exc:
+                        _log(f"    [错误] 提取第 {page_num} 页失败：{exc}")
+                        _report_page(page_num, "failed", error=str(exc))
+                        raise
+                    _report_page(page_num, "completed" if items else "empty", len(items))
                     first_rank = items[0].get("排名", items[0].get("标题", "?")) if items else "?"
                     last_rank = items[-1].get("排名", items[-1].get("标题", "?")) if items else "?"
                     _log(f"  第 {page_num} 页：{first_rank} ~ {last_rank}（本页 {len(items)} 条，累计 {len(all_results)+len(items)} 条）")
                     all_results.extend(items)
+                    if page_num >= pg["max_pages"]:
+                        break
 
                     next_btn = page.query_selector(next_sel)
                     if not next_btn:
@@ -1096,20 +1582,52 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
                         break
 
                     old_first = first_rank
-                    next_btn.click()
-                    for _ in range(20):
-                        time.sleep(0.2)
-                        new_items = _extract_items_from_page(page, cfg)
-                        if new_items:
-                            new_first = new_items[0].get("排名", new_items[0].get("标题", ""))
-                            if new_first and new_first != old_first:
+                    if _cancelled():
+                        _report_page(page_num + 1, "cancelled")
+                        break
+                    _report_page(page_num + 1, "running")
+                    try:
+                        if not _wait_for_request_slot(page.url, delay, cancel_event):
+                            _report_page(page_num + 1, "cancelled")
+                            break
+                        if _cancelled():
+                            _report_page(page_num + 1, "cancelled")
+                            break
+                        next_btn.click()
+                        page_changed = False
+                        for _ in range(20):
+                            if _cancelled():
+                                _report_page(page_num + 1, "cancelled")
                                 break
-                    time.sleep(delay)
+                            time.sleep(0.2)
+                            new_items = _extract_items_from_page(page, cfg)
+                            if new_items:
+                                new_first = new_items[0].get("排名", new_items[0].get("标题", ""))
+                                if new_first and new_first != old_first:
+                                    page_changed = True
+                                    break
+                        if not _cancelled() and not page_changed:
+                            _log(f"    [错误] 点击后页面未变化，停止翻页")
+                            _report_page(page_num + 1, "failed", error="点击下一页后内容未变化")
+                            break
+                    except Exception as exc:
+                        _log(f"    [错误] 翻到第 {page_num + 1} 页失败：{exc}")
+                        _report_page(page_num + 1, "failed", error=str(exc))
+                        break
 
             elif pg["type"] == "infinite_scroll":
                 _log(f"[无限滚动] {first_url}")
-                page.goto(first_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(cfg.get("page_wait", 3000))
+                if _cancelled():
+                    _report_page(1, "cancelled")
+                    browser.close()
+                    return []
+                _report_page(1, "running")
+                try:
+                    _goto_with_pacing(page, first_url, cfg, wait_until="domcontentloaded", timeout=30000)
+                except Exception as exc:
+                    _report_page(1, "failed", error=str(exc))
+                    raise
+                _wait_playwright_page(page, cfg.get("page_wait", 3000), cancel_event)
                 scroll_pause = pg.get("scroll_pause", 1.5)
                 max_scrolls = pg.get("max_scrolls", 50)  # 兜底，防止无限加载
 
@@ -1128,11 +1646,26 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
                     return fp
 
                 while stable_rounds < 3 and scrolls < max_scrolls:
+                    if _cancelled():
+                        break
                     scrolls += 1
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(int(scroll_pause * 1000))
+                    try:
+                        if not _wait_for_request_slot(page.url, delay, cancel_event):
+                            break
+                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    except Exception as exc:
+                        _log(f"    [错误] 滚动加载失败：{exc}")
+                        _report_page(1, "failed", error=str(exc))
+                        raise
+                    if not _wait_playwright_page(page, int(scroll_pause * 1000), cancel_event):
+                        break
 
-                    items = _extract_items_from_page(page, cfg)
+                    try:
+                        items = _extract_items_from_page(page, cfg)
+                    except Exception as exc:
+                        _log(f"    [错误] 提取滚动结果失败：{exc}")
+                        _report_page(1, "failed", error=str(exc))
+                        raise
                     # 只吸收新条目（按指纹去重）
                     current_fp = set(_fingerprint(items))
                     new_fp = current_fp - seen_keys
@@ -1152,6 +1685,7 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
                 if scrolls >= max_scrolls:
                     _log(f"  达到最大滚动次数 {max_scrolls}，停止")
                 all_results = collected
+                _report_page(1, "cancelled" if _cancelled() else ("completed" if collected else "empty"), len(collected))
 
             else:
                 _log(f"  [错误] 未知翻页策略 '{pg['type']}'")
@@ -1180,6 +1714,8 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
         # 预筛选需要补充详情的行
         rows_to_fill = []
         for row in all_results:
+            if _cancelled():
+                break
             if limit and done >= limit:
                 break
             if not link_field or not row.get(link_field):
@@ -1191,17 +1727,27 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
         def _fill_detail(row):
             """抓详情页并回填字段，返回是否成功"""
             nonlocal done
+            if _cancelled():
+                return False
             detail_url = row[link_field]
             if not detail_url.startswith("http"):
                 base = cfg.get("first_url") or pg.get("url_pattern", "")
                 detail_url = urljoin(base, detail_url)
-            html = _download_direct(detail_url, requester, log_callback=log_callback, proxy=cfg.get("proxy")) if requester else ""
+            if not _robots_allowed(detail_url, cfg, log_callback):
+                _log(f"[robots.txt] 禁止抓取详情页：{detail_url}")
+                return False
+            html = (
+                _fetch_with_challenge_fallback(
+                    detail_url, cfg, requester, log_callback, proxies,
+                    request_delay=delay,
+                )
+                if requester else ""
+            )
             if html and not _looks_like_challenge(html):
                 detail_sel = parsel.Selector(text=html)
                 for col_name, css_expr in detail_cfg.get("fields", {}).items():
                     row[col_name] = _extract(detail_sel, css_expr)
                 done += 1
-                time.sleep(delay)
                 return True
             return False
 
@@ -1238,7 +1784,7 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
 
         out_dir = out_dir or (Path(__file__).resolve().parent.parent / "data" / "demo")
         out_dir.mkdir(parents=True, exist_ok=True)
-        xlsx_path = out_dir / f"{name}.xlsx"
+        xlsx_path = out_dir / f"{_safe_name(str(name))}.xlsx"
         import pandas as pd
         df = pd.DataFrame(all_results)
         df.to_excel(xlsx_path, index=False)
@@ -1250,16 +1796,32 @@ def crawl(config: Dict[str, Any], requester=None, out_dir: Optional[Path] = None
 
 
 def _fetch_with_challenge_fallback(url: str, cfg: Dict, requester, log_callback,
-                                   proxies: Optional[List[str]] = None) -> str:
+                                   proxies: Optional[List[str]] = None,
+                                   request_delay: float = 0.0) -> str:
     """
     direct 请求，若响应疑似 WAF/挑战页，自动切 playwright 渲染拿真实 HTML。
     这就是"挑战页识别 → 浏览器渲染 → 重放"的闭环（浏览器执行 JS 后拿到真实 DOM）。
     """
+    if not _robots_allowed(url, cfg, log_callback):
+        if log_callback:
+            log_callback(f"[robots.txt] 禁止抓取：{url}")
+        return ""
+
     # 若配置禁用了自动降级（如目标页较大、只想快速走 direct），则不启用
     if not cfg.get("auto_fallback", True):
-        return _download_direct(url, requester, log_callback=log_callback, proxies=proxies)
+        return _download_direct(
+            url, requester, log_callback=log_callback, proxies=proxies,
+            request_delay=request_delay, headers=cfg.get("headers"),
+            cancel_event=cfg.get("_cancel_event"),
+        )
 
-    html = _download_direct(url, requester, log_callback=log_callback, proxies=proxies)
+    html = _download_direct(
+        url, requester, log_callback=log_callback, proxies=proxies,
+        request_delay=request_delay, headers=cfg.get("headers"),
+        cancel_event=cfg.get("_cancel_event"),
+    )
+    if cfg.get("_cancel_event") is not None and cfg["_cancel_event"].is_set():
+        return ""
     if html and _looks_like_challenge(html):
         def _log(m=""):
             if log_callback:

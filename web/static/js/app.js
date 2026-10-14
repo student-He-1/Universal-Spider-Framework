@@ -5,12 +5,23 @@
 let socket = null;
 let currentTaskId = null;
 
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, ch => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;",
+    })[ch]);
+}
+
 // ================================================================
 // 初始化
 // ================================================================
 document.addEventListener("DOMContentLoaded", () => {
     initWebSocket();
     loadTemplates();
+    loadTaskHistory();
     initPaginationToggle();
     initFieldEditor();
     initButtons();
@@ -55,17 +66,21 @@ function initWebSocket() {
     // 爬取完成
     socket.on("crawl_done", (data) => {
         if (data.task_id === currentTaskId) {
-            if (data.status === "completed") {
+            if (data.status === "completed" || data.status === "partial" || data.status === "cancelled") {
                 const elapsed = formatElapsed(Date.now() - taskStartTime);
-                setStatus("completed", `爬取完成，共 ${data.count} 条`);
-                updateTaskStats(`<span class="stat-value-mono">${data.count} 条</span> <span class="api-hint">· ${taskFieldCount} 字段 · ${elapsed}</span>`);
+                const label = data.status === "partial" ? "部分完成" :
+                    (data.status === "cancelled" ? "已取消" : "爬取完成");
+                setStatus(data.status, `${label}，共 ${data.count || 0} 条`);
+                updateTaskStats(`<span class="stat-value-mono">${data.count || 0} 条</span> <span class="api-hint">· ${taskFieldCount} 字段 · ${elapsed}</span>`);
                 loadResult(data.task_id);
             } else {
                 setStatus("failed", `爬取失败：${data.error || "未知错误"}`);
                 updateTaskStats('<span class="status-failed">失败</span>');
             }
             document.getElementById("start-crawl").disabled = false;
+            document.getElementById("cancel-crawl").disabled = true;
         }
+        loadTaskHistory();
     });
 }
 
@@ -73,6 +88,196 @@ function setWsStatus(connected) {
     const el = document.getElementById("ws-status");
     el.textContent = connected ? "已连接" : "未连接";
     el.className = "ws-status " + (connected ? "connected" : "disconnected");
+}
+
+const TASK_STATUS_LABELS = {
+    pending: "排队中", running: "运行中", cancelling: "正在取消",
+    completed: "完成", partial: "部分完成", failed: "失败",
+    cancelled: "已取消", interrupted: "已中断",
+};
+
+async function loadTaskHistory() {
+    const list = document.getElementById("task-history-list");
+    if (!list) return;
+    try {
+        const resp = await fetch("/api/tasks");
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || "读取任务历史失败");
+        list.replaceChildren();
+        if (!data.tasks.length) {
+            const empty = document.createElement("div");
+            empty.className = "task-history-empty";
+            empty.textContent = "还没有任务记录";
+            list.appendChild(empty);
+            return;
+        }
+        data.tasks.forEach(task => {
+            const row = document.createElement("div");
+            row.className = "task-history-row";
+            const main = document.createElement("div");
+            main.className = "task-history-main";
+            const name = document.createElement("div");
+            name.className = "task-history-name";
+            name.textContent = task.name || task.task_id;
+            const pill = document.createElement("span");
+            pill.className = `task-status-pill ${task.status}`;
+            pill.textContent = TASK_STATUS_LABELS[task.status] || task.status;
+            name.appendChild(pill);
+            const meta = document.createElement("div");
+            meta.className = "task-history-meta";
+            const date = task.created_at ? new Date(task.created_at * 1000).toLocaleString() : "";
+            meta.textContent = `${date} · ${task.count || 0} 条` +
+                (task.failed_pages ? ` · ${task.failed_pages} 页失败` : "");
+            main.append(name, meta);
+
+            const actions = document.createElement("div");
+            actions.className = "task-history-actions";
+            const view = document.createElement("button");
+            view.className = "btn btn-ghost btn-sm";
+            view.textContent = "查看";
+            view.addEventListener("click", () => selectTask(task.task_id));
+            actions.appendChild(view);
+            if (task.has_file) {
+                const download = document.createElement("a");
+                download.className = "btn btn-ghost btn-sm";
+                download.href = `/api/download/${encodeURIComponent(task.task_id)}`;
+                download.textContent = "下载";
+                actions.appendChild(download);
+            }
+            const configure = document.createElement("button");
+            configure.className = "btn btn-ghost btn-sm";
+            configure.textContent = "载入配置";
+            configure.addEventListener("click", () => loadTaskConfig(task.task_id));
+            actions.appendChild(configure);
+            if (task.can_retry) {
+                const retry = document.createElement("button");
+                retry.className = "btn btn-secondary btn-sm";
+                retry.textContent = task.retry_action === "resume_pages" ? "续跑未完成页" : "重新运行";
+                retry.addEventListener("click", () => retryTask(task.task_id));
+                actions.appendChild(retry);
+            } else if (task.has_redacted_secrets) {
+                const secretNote = document.createElement("span");
+                secretNote.className = "api-hint";
+                secretNote.textContent = "敏感凭据需重填";
+                actions.appendChild(secretNote);
+            }
+            if (task.can_cancel) {
+                const cancel = document.createElement("button");
+                cancel.className = "btn btn-ghost btn-sm";
+                cancel.textContent = "取消";
+                cancel.addEventListener("click", () => cancelTask(task.task_id));
+                actions.appendChild(cancel);
+            }
+            row.append(main, actions);
+            list.appendChild(row);
+        });
+    } catch (error) {
+        list.textContent = `任务历史读取失败：${error.message}`;
+    }
+}
+
+async function syncTaskStatus(taskId) {
+    try {
+        const resp = await fetch(`/api/status/${encodeURIComponent(taskId)}`);
+        const task = await resp.json();
+        if (!resp.ok || currentTaskId !== taskId) return;
+        document.getElementById("start-crawl").disabled = Boolean(task.can_cancel);
+        document.getElementById("cancel-crawl").disabled = !task.can_cancel;
+        if (["completed", "partial", "cancelled"].includes(task.status)) {
+            const label = TASK_STATUS_LABELS[task.status] || task.status;
+            setStatus(task.status, `${label}，共 ${task.count || 0} 条`);
+            await loadResult(taskId);
+        } else if (task.status === "failed") {
+            setStatus("failed", `爬取失败：${task.error || "未知错误"}`);
+        } else {
+            setStatus(task.status, TASK_STATUS_LABELS[task.status] || task.status);
+        }
+        loadTaskHistory();
+    } catch (error) {
+        console.error("同步任务状态失败:", error);
+    }
+}
+
+async function selectTask(taskId) {
+    try {
+        const resp = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+        const task = await resp.json();
+        if (!resp.ok) throw new Error(task.error || "读取任务失败");
+        currentTaskId = taskId;
+        const panel = document.getElementById("log-panel");
+        panel.replaceChildren();
+        (task.log || "").split("\n").filter(Boolean).forEach(line => appendLog(line));
+        const failedPages = (task.pages || []).filter(page => page.status === "failed");
+        if (failedPages.length) {
+            const shown = failedPages.slice(0, 50).map(page => page.page_no).join(", ");
+            appendLog(`[失败页] 第 ${shown}${failedPages.length > 50 ? ` 等 ${failedPages.length} 页` : ""}`, "log-error");
+        }
+        const status = TASK_STATUS_LABELS[task.status] || task.status;
+        setStatus(task.status, `${status}${task.error ? `：${task.error}` : ""}`);
+        updateTaskStats(`<span class="stat-value-mono">${Number(task.count) || 0} 条</span>`);
+        document.getElementById("start-crawl").disabled = Boolean(task.can_cancel);
+        document.getElementById("cancel-crawl").disabled = !task.can_cancel;
+        if (task.config) {
+            document.getElementById("stat-render").textContent = task.config.render || "direct";
+            document.getElementById("stat-concurrency").textContent =
+                `${task.config.concurrency || 1} · ${task.config.delay || 0}s`;
+        }
+        if (["completed", "partial", "cancelled"].includes(task.status)) await loadResult(taskId);
+    } catch (error) {
+        appendLog(`[错误] ${error.message}`, "log-error");
+    }
+}
+
+async function loadTaskConfig(taskId) {
+    try {
+        const resp = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+        const task = await resp.json();
+        if (!resp.ok) throw new Error(task.error || "读取任务配置失败");
+        fillConfigForm(task.config || {});
+        if (task.has_redacted_secrets) {
+            appendLog("[提示] 敏感凭据已脱敏，请在表单中补回凭据后再启动。", "log-highlight");
+        } else {
+            appendLog(`[任务] 已载入「${task.name}」的配置。`, "log-highlight");
+        }
+    } catch (error) {
+        appendLog(`[错误] ${error.message}`, "log-error");
+    }
+}
+
+async function cancelTask(taskId) {
+    try {
+        const resp = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || "取消失败");
+        if (taskId === currentTaskId) {
+            setStatus("cancelling", "正在取消任务…");
+            document.getElementById("cancel-crawl").disabled = true;
+        }
+        loadTaskHistory();
+    } catch (error) {
+        appendLog(`[取消失败] ${error.message}`, "log-error");
+    }
+}
+
+function cancelCurrentTask() {
+    if (currentTaskId) cancelTask(currentTaskId);
+}
+
+async function retryTask(taskId) {
+    try {
+        const resp = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || "重试失败");
+        currentTaskId = data.task_id;
+        setStatus("pending", "重试任务已排队");
+        document.getElementById("start-crawl").disabled = true;
+        document.getElementById("cancel-crawl").disabled = false;
+        appendLog(`[任务] 已创建重试任务，新任务 ID：${data.task_id}`, "log-highlight");
+        loadTaskHistory();
+        syncTaskStatus(data.task_id);
+    } catch (error) {
+        appendLog(`[重试失败] ${error.message}`, "log-error");
+    }
 }
 
 // ================================================================
@@ -151,8 +356,8 @@ function addFieldRow(name = "", selector = "") {
     const row = document.createElement("div");
     row.className = "field-row";
     row.innerHTML = `
-        <input type="text" placeholder="列名" value="${name}" class="field-name">
-        <input type="text" placeholder="选择器（如 div.title::text）" value="${selector}" class="field-selector">
+        <input type="text" placeholder="列名" value="${escapeHtml(name)}" class="field-name">
+        <input type="text" placeholder="选择器（如 div.title::text）" value="${escapeHtml(selector)}" class="field-selector">
         <button class="remove-field" title="删除">×</button>
     `;
     row.querySelector(".remove-field").addEventListener("click", () => row.remove());
@@ -169,6 +374,8 @@ function initButtons() {
     });
 
     document.getElementById("start-crawl").addEventListener("click", startCrawl);
+    document.getElementById("cancel-crawl").addEventListener("click", cancelCurrentTask);
+    document.getElementById("refresh-task-history").addEventListener("click", loadTaskHistory);
 
     document.getElementById("clear-log").addEventListener("click", () => {
         document.getElementById("log-panel").innerHTML = "";
@@ -205,7 +412,7 @@ async function runProbe() {
         if (!data.ok) {
             statusEl.textContent = "探测失败";
             statusEl.className = "probe-status failed";
-            resultEl.innerHTML = `<div class="probe-row">⚠ ${data.error || "未知错误"}</div>`;
+            resultEl.innerHTML = `<div class="probe-row">⚠ ${escapeHtml(data.error || "未知错误")}</div>`;
             resultEl.classList.remove("hidden");
             return;
         }
@@ -214,20 +421,21 @@ async function runProbe() {
         statusEl.className = "probe-status success";
 
         const items = (data.item_candidates || []).map(c =>
-            `<div class="probe-item" data-sel="${c.selector}">
-                <code>${c.selector}</code><span class="probe-count">${c.count} 个</span>
+            `<div class="probe-item" data-sel="${escapeHtml(c.selector)}">
+                <code>${escapeHtml(c.selector)}</code><span class="probe-count">${escapeHtml(c.count)} 个</span>
              </div>`).join("");
         const fields = Object.entries(data.fields_candidates || {}).map(([k, v]) =>
-            `<span class="probe-chip" data-sel="${v}" data-name="${k}">${k} · ${v}</span>`).join("");
+            `<span class="probe-chip" data-sel="${escapeHtml(v)}" data-name="${escapeHtml(k)}">${escapeHtml(k)} · ${escapeHtml(v)}</span>`).join("");
+        const render = data.render === "playwright" ? "playwright" : "direct";
 
         resultEl.innerHTML = `
-            <div class="probe-row"><b>标题：</b>${data.title || "—"}</div>
-            <div class="probe-row"><b>渲染：</b><span class="tag tag-${data.render}">${data.render}</span>
-                 <b>翻页：</b><span class="tag">${data.pagination}</span>
+            <div class="probe-row"><b>标题：</b>${escapeHtml(data.title || "—")}</div>
+            <div class="probe-row"><b>渲染：</b><span class="tag tag-${render}">${render}</span>
+                 <b>翻页：</b><span class="tag">${escapeHtml(data.pagination)}</span>
                  ${data.js_dynamic ? '<span class="tag tag-warn">JS动态</span>' : ''}
                  ${data.challenge ? '<span class="tag tag-danger">WAF/挑战</span>' : ''}
                  ${data.has_ssr_json ? '<span class="tag">SSR内嵌</span>' : ''}</div>
-            ${data.pagination_note ? `<div class="probe-row probe-note">💡 ${data.pagination_note}</div>` : ''}
+            ${data.pagination_note ? `<div class="probe-row probe-note">💡 ${escapeHtml(data.pagination_note)}</div>` : ''}
             <div class="probe-row"><b>内容容器候选：</b></div>
             <div class="probe-items">${items || '<span class="api-hint">未识别到常见容器</span>'}</div>
             <div class="probe-row"><b>字段候选（点击填入表单）：</b></div>
@@ -251,11 +459,11 @@ async function runProbe() {
             });
         });
         // 渲染方式回填
-        if (data.render) document.getElementById("cfg-render").value = data.render;
+        document.getElementById("cfg-render").value = render;
     } catch (e) {
         statusEl.textContent = "探测异常";
         statusEl.className = "probe-status failed";
-        resultEl.innerHTML = `<div class="probe-row">⚠ ${e.message}</div>`;
+        resultEl.innerHTML = `<div class="probe-row">⚠ ${escapeHtml(e.message)}</div>`;
         resultEl.classList.remove("hidden");
     }
 }
@@ -472,6 +680,8 @@ async function startCrawl() {
 
     setStatus("running", "正在爬取...");
     document.getElementById("start-crawl").disabled = true;
+    document.getElementById("cancel-crawl").disabled = true;
+    currentTaskId = null;
 
     // 初始化当前任务统计
     taskFieldCount = Object.keys(config.fields).length;
@@ -495,7 +705,10 @@ async function startCrawl() {
         const data = await resp.json();
         if (data.task_id) {
             currentTaskId = data.task_id;
+            document.getElementById("cancel-crawl").disabled = false;
             appendLog(`[任务ID] ${currentTaskId}\n\n`);
+            loadTaskHistory();
+            syncTaskStatus(data.task_id);
         } else {
             throw new Error(data.error || "提交失败");
         }
@@ -503,6 +716,7 @@ async function startCrawl() {
         setStatus("failed", `提交失败：${e.message}`);
         appendLog(`[错误] ${e.message}\n`, "log-error");
         document.getElementById("start-crawl").disabled = false;
+        document.getElementById("cancel-crawl").disabled = true;
     }
 }
 
@@ -558,7 +772,15 @@ async function loadResult(taskId) {
 // ================================================================
 function setStatus(type, text) {
     const bar = document.getElementById("status-bar");
-    bar.innerHTML = `<span class="status-${type}">${text}</span>`;
+    const value = bar.querySelector(".stat-value-wrap") || bar;
+    const status = document.createElement("span");
+    const allowedTypes = new Set([
+        "idle", "pending", "running", "cancelling", "completed", "partial",
+        "failed", "cancelled", "interrupted",
+    ]);
+    status.className = "status-" + (allowedTypes.has(type) ? type : "idle");
+    status.textContent = String(text ?? "");
+    value.replaceChildren(status);
 }
 
 function appendLog(text, className = "") {

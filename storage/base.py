@@ -2,7 +2,35 @@
 存储基类接口
 """
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+
+def ensure_unique_key(cur: Any, table: str, columns: List[str]) -> None:
+    """
+    把表上的唯一约束收敛为指定复合键（幂等，便于老库自动迁移）。
+
+    - 删除仅作用于单个旧列的旧唯一约束（如历史遗留的 UNIQUE(url_hash)）；
+    - 缺失时补充目标复合唯一约束（如 UNIQUE(site_name, url_hash)）。
+
+    这样不同站点可以各存同一 URL，而改过唯一键的库无需手工建表即可直接工作。
+    """
+    target = "UNIQUE (" + ", ".join(columns) + ")"
+    normalized_target = target.replace(" ", "")
+    legacy_single_keys = {("UNIQUE (" + c + ")").replace(" ", "") for c in columns}
+    cur.execute(
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = %s::regclass AND contype = 'u'",
+        (table,),
+    )
+    has_target = False
+    for conname, definition in cur.fetchall():
+        normalized = (definition or "").replace(" ", "")
+        if normalized == normalized_target:
+            has_target = True
+        elif normalized in legacy_single_keys:
+            cur.execute(f'ALTER TABLE "{table}" DROP CONSTRAINT "{conname}"')
+    if not has_target:
+        cur.execute(f'ALTER TABLE "{table}" ADD {target}')
 
 
 class BaseStorage(ABC):

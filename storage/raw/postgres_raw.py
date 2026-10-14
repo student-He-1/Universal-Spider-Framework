@@ -18,7 +18,7 @@ import psycopg2
 from psycopg2.extras import Json, execute_values
 
 from config.settings import settings
-from storage.base import BaseStorage
+from storage.base import BaseStorage, ensure_unique_key
 from utils.helpers import url_fingerprint
 from utils.logger import get_logger
 
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS raw_data (
     status VARCHAR(32) NOT NULL DEFAULT 'crawled',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(url_hash)
+    UNIQUE(site_name, url_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_raw_site ON raw_data(site_name);
 CREATE INDEX IF NOT EXISTS idx_raw_status ON raw_data(status);
@@ -68,6 +68,8 @@ class PostgresRawStorage(BaseStorage):
             conn = self._get_conn()
             with conn.cursor() as cur:
                 cur.execute(CREATE_TABLE_SQL)
+                # 老库若仍是 UNIQUE(url_hash)，就地迁移为复合唯一键
+                ensure_unique_key(cur, "raw_data", ["site_name", "url_hash"])
         except Exception as e:
             logger.error(f"原始数据表初始化失败: {e}")
 
@@ -77,7 +79,7 @@ class PostgresRawStorage(BaseStorage):
         sql = """
         INSERT INTO raw_data (site_name, url, url_hash, raw_data, status)
         VALUES (%s, %s, %s, %s, 'crawled')
-        ON CONFLICT (url_hash) DO UPDATE
+        ON CONFLICT (site_name, url_hash) DO UPDATE
         SET raw_data = EXCLUDED.raw_data,
             status = 'crawled',
             updated_at = CURRENT_TIMESTAMP
@@ -106,7 +108,7 @@ class PostgresRawStorage(BaseStorage):
         sql = """
         INSERT INTO raw_data (site_name, url, url_hash, raw_data, status)
         VALUES %s
-        ON CONFLICT (url_hash) DO UPDATE
+        ON CONFLICT (site_name, url_hash) DO UPDATE
         SET raw_data = EXCLUDED.raw_data,
             status = 'crawled',
             updated_at = CURRENT_TIMESTAMP
